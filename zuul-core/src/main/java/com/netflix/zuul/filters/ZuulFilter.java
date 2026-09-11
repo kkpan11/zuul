@@ -17,9 +17,11 @@ package com.netflix.zuul.filters;
 
 import com.netflix.zuul.Filter;
 import com.netflix.zuul.FilterCategory;
+import com.netflix.zuul.FilterConstraint;
 import com.netflix.zuul.exception.ZuulFilterConcurrencyExceededException;
 import com.netflix.zuul.message.ZuulMessage;
 import io.netty.handler.codec.http.HttpContent;
+import java.util.concurrent.CompletableFuture;
 import rx.Observable;
 
 /**
@@ -71,8 +73,18 @@ public interface ZuulFilter<I extends ZuulMessage, O extends ZuulMessage> extend
         Filter f = getClass().getAnnotation(Filter.class);
         if (f != null) {
             return f.category();
+        } else {
+            return FilterCategory.UNSPECIFIED;
         }
-        throw new UnsupportedOperationException("not implemented");
+    }
+
+    default Class<? extends FilterConstraint>[] constraints() {
+        Filter annotation = getClass().getAnnotation(Filter.class);
+        if (annotation != null) {
+            return annotation.constraints();
+        } else {
+            return null;
+        }
     }
 
     /**
@@ -91,9 +103,34 @@ public interface ZuulFilter<I extends ZuulMessage, O extends ZuulMessage> extend
     void incrementConcurrency() throws ZuulFilterConcurrencyExceededException;
 
     /**
-     * if shouldFilter() is true, this method will be invoked. this method is the core method of a ZuulFilter
+     * @deprecated Override {@link #applyAsync} instead. Will be removed in a future version of Zuul.
      */
-    Observable<O> applyAsync(I input);
+    @Deprecated
+    @SuppressWarnings("deprecation")
+    default Observable<O> applyAsyncObservable(I input) {
+        CompletableFuture<O> future = applyAsync(input);
+        return Observable.create(subscriber -> {
+            future.whenComplete((result, error) -> {
+                if (error != null) {
+                    subscriber.onError(error);
+                } else {
+                    subscriber.onNext(result);
+                    subscriber.onCompleted();
+                }
+            });
+        });
+    }
+
+    /**
+     * If shouldFilter() is true, this method will be invoked. This is the core method of a ZuulFilter.
+     */
+    @SuppressWarnings("deprecation")
+    default CompletableFuture<O> applyAsync(I input) {
+        CompletableFuture<O> future = new CompletableFuture<>();
+        applyAsyncObservable(input)
+                .subscribe(future::complete, future::completeExceptionally, () -> future.complete(null));
+        return future;
+    }
 
     /**
      * Called by zuul filter after request is processed by this filter.
@@ -127,5 +164,31 @@ public interface ZuulFilter<I extends ZuulMessage, O extends ZuulMessage> extend
     /**
      * Optionally transform HTTP content chunk received.
      */
-    HttpContent processContentChunk(ZuulMessage zuulMessage, HttpContent chunk);
+    default HttpContent processContentChunk(ZuulMessage zuulMessage, HttpContent chunk) {
+        return chunk;
+    }
+
+    /**
+     * Whether this filter transforms streaming body chunks in processContentChunk.
+     * Given filters _generally_ do not process chunks, this allows the filter running to
+     * skip processing shouldFilter for every chunk.
+     */
+    default boolean processesContentChunks() {
+        return true;
+    }
+
+    /**
+     * Determines if the given filterClass overrides processContentChunk.
+     */
+    static boolean overridesProcessContentChunk(Class<?> filterClass) {
+        try {
+            return filterClass
+                            .getMethod("processContentChunk", ZuulMessage.class, HttpContent.class)
+                            .getDeclaringClass()
+                    != ZuulFilter.class;
+        } catch (NoSuchMethodException e) {
+            // fallback to assuming it does
+            return true;
+        }
+    }
 }

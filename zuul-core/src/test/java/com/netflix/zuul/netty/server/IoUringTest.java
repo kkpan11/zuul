@@ -16,10 +16,8 @@
 
 package com.netflix.zuul.netty.server;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Mockito.mock;
 
@@ -31,8 +29,8 @@ import com.netflix.spectator.api.Spectator;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.group.DefaultChannelGroup;
-import io.netty.incubator.channel.uring.IOUring;
-import io.netty.incubator.channel.uring.IOUringSocketChannel;
+import io.netty.channel.uring.IoUring;
+import io.netty.channel.uring.IoUringServerSocketChannel;
 import io.netty.util.concurrent.GlobalEventExecutor;
 import io.netty.util.internal.PlatformDependent;
 import java.io.OutputStream;
@@ -61,21 +59,22 @@ import org.slf4j.LoggerFactory;
      4) verify that the server stops
 
 */
+@SuppressWarnings("AddressSelection")
 @Disabled
 class IoUringTest {
     private static final Logger LOGGER = LoggerFactory.getLogger(IoUringTest.class);
-    private static final boolean IS_OS_LINUX = "linux".equals(PlatformDependent.normalizedOs());
+    private static final boolean IS_OS_LINUX = PlatformDependent.normalizedOs().equals("linux");
 
     @BeforeEach
     void beforeTest() {
-        final AbstractConfiguration config = ConfigurationManager.getConfigInstance();
+        AbstractConfiguration config = ConfigurationManager.getConfigInstance();
         config.setProperty("zuul.server.netty.socket.force_io_uring", "true");
         config.setProperty("zuul.server.netty.socket.force_nio", "false");
     }
 
     @Test
     void testIoUringServer() throws Exception {
-        LOGGER.info("IOUring.isAvailable: {}", IOUring.isAvailable());
+        LOGGER.info("IOUring.isAvailable: {}", IoUring.isAvailable());
         LOGGER.info("IS_OS_LINUX: {}", IS_OS_LINUX);
 
         if (IS_OS_LINUX) {
@@ -84,21 +83,21 @@ class IoUringTest {
     }
 
     private void exerciseIoUringServer() throws Exception {
-        IOUring.ensureAvailability();
+        IoUring.ensureAvailability();
 
         ServerStatusManager ssm = mock(ServerStatusManager.class);
 
         Map<NamedSocketAddress, ChannelInitializer<?>> initializers = new HashMap<>();
 
-        final List<IOUringSocketChannel> ioUringChannels =
-                Collections.synchronizedList(new ArrayList<IOUringSocketChannel>());
+        List<IoUringServerSocketChannel> ioUringChannels =
+                Collections.synchronizedList(new ArrayList<IoUringServerSocketChannel>());
 
         ChannelInitializer<Channel> init = new ChannelInitializer<Channel>() {
             @Override
             protected void initChannel(Channel ch) {
                 LOGGER.info("Channel: {}, isActive={}, isOpen={}", ch.getClass().getName(), ch.isActive(), ch.isOpen());
-                if (ch instanceof IOUringSocketChannel) {
-                    ioUringChannels.add((IOUringSocketChannel) ch);
+                if (ch instanceof IoUringServerSocketChannel) {
+                    ioUringChannels.add((IoUringServerSocketChannel) ch);
                 }
             }
         };
@@ -126,12 +125,12 @@ class IoUringTest {
         s.start();
 
         List<NamedSocketAddress> addresses = s.getListeningAddresses();
-        assertEquals(2, addresses.size());
+        assertThat(addresses.size()).isEqualTo(2);
 
         addresses.forEach(address -> {
-            assertTrue(address.unwrap() instanceof InetSocketAddress);
+            assertThat(address.unwrap() instanceof InetSocketAddress).isTrue();
             InetSocketAddress inetAddress = ((InetSocketAddress) address.unwrap());
-            assertNotEquals(0, inetAddress.getPort());
+            assertThat(inetAddress.getPort()).isNotEqualTo(0);
             checkConnection(inetAddress.getPort());
         });
 
@@ -139,14 +138,15 @@ class IoUringTest {
 
         s.stop();
 
-        assertEquals(2, ioUringChannels.size());
+        assertThat(ioUringChannels.size()).isEqualTo(2);
 
-        for (IOUringSocketChannel ch : ioUringChannels) {
-            assertTrue(ch.isShutdown(), "isShutdown");
+        for (IoUringServerSocketChannel ch : ioUringChannels) {
+            assertThat(ch.eventLoop().isShutdown()).as("isShutdown").isTrue();
         }
     }
 
-    private static void checkConnection(final int port) {
+    @SuppressWarnings("EmptyCatch")
+    private static void checkConnection(int port) {
         LOGGER.info("checkConnection port {}", port);
         Socket sock = null;
         try {

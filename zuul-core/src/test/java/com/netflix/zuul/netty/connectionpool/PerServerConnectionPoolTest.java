@@ -16,18 +16,11 @@
 
 package com.netflix.zuul.netty.connectionpool;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.spy;
 
 import com.netflix.appinfo.InstanceInfo;
-import com.netflix.appinfo.InstanceInfo.Builder;
 import com.netflix.client.config.DefaultClientConfigImpl;
 import com.netflix.client.config.IClientConfigKey.Keys;
 import com.netflix.spectator.api.Counter;
@@ -43,11 +36,13 @@ import com.netflix.zuul.passport.PassportState;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelInitializer;
-import io.netty.channel.DefaultEventLoopGroup;
 import io.netty.channel.EventLoop;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
+import io.netty.channel.MultithreadEventLoopGroup;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.channel.local.LocalAddress;
 import io.netty.channel.local.LocalChannel;
+import io.netty.channel.local.LocalIoHandler;
 import io.netty.channel.local.LocalServerChannel;
 import io.netty.handler.codec.DecoderException;
 import io.netty.util.concurrent.Promise;
@@ -72,8 +67,8 @@ import org.mockito.MockitoAnnotations;
 class PerServerConnectionPoolTest {
 
     private static LocalAddress LOCAL_ADDRESS;
-    private static DefaultEventLoopGroup ORIGIN_EVENT_LOOP_GROUP;
-    private static DefaultEventLoopGroup CLIENT_EVENT_LOOP_GROUP;
+    private static MultithreadEventLoopGroup ORIGIN_EVENT_LOOP_GROUP;
+    private static MultithreadEventLoopGroup CLIENT_EVENT_LOOP_GROUP;
     private static EventLoop CLIENT_EVENT_LOOP;
     private static Class<? extends Channel> PREVIOUS_CHANNEL_TYPE;
 
@@ -103,10 +98,10 @@ class PerServerConnectionPoolTest {
     static void staticSetup() throws InterruptedException {
         LOCAL_ADDRESS = new LocalAddress(UUID.randomUUID().toString());
 
-        CLIENT_EVENT_LOOP_GROUP = new DefaultEventLoopGroup(1);
+        CLIENT_EVENT_LOOP_GROUP = new MultiThreadIoEventLoopGroup(1, LocalIoHandler.newFactory());
         CLIENT_EVENT_LOOP = CLIENT_EVENT_LOOP_GROUP.next();
 
-        ORIGIN_EVENT_LOOP_GROUP = new DefaultEventLoopGroup(1);
+        ORIGIN_EVENT_LOOP_GROUP = new MultiThreadIoEventLoopGroup(1, LocalIoHandler.newFactory());
         ServerBootstrap bootstrap = new ServerBootstrap()
                 .group(ORIGIN_EVENT_LOOP_GROUP)
                 .localAddress(LOCAL_ADDRESS)
@@ -152,7 +147,7 @@ class PerServerConnectionPoolTest {
 
         OriginName originName = OriginName.fromVipAndApp("whatever", "whatever-secure");
 
-        InstanceInfo instanceInfo = Builder.newBuilder()
+        InstanceInfo instanceInfo = InstanceInfo.Builder.newBuilder()
                 .setIPAddr("175.45.176.0")
                 .setPort(7001)
                 .setAppName("whatever")
@@ -199,9 +194,9 @@ class PerServerConnectionPoolTest {
 
         Promise<PooledConnection> promise = pool.acquire(CLIENT_EVENT_LOOP, currentPassport, new AtomicReference<>());
 
-        assertFalse(promise.isSuccess());
-        assertTrue(promise.cause() instanceof OriginConnectException);
-        assertEquals(1, maxConnsPerHostExceededCounter.count());
+        assertThat(promise.isSuccess()).isFalse();
+        assertThat(promise.cause() instanceof OriginConnectException).isTrue();
+        assertThat(maxConnsPerHostExceededCounter.count()).isEqualTo(1);
     }
 
     @Test
@@ -210,12 +205,13 @@ class PerServerConnectionPoolTest {
         Promise<PooledConnection> promise = pool.acquire(CLIENT_EVENT_LOOP, currentPassport, new AtomicReference<>());
 
         PooledConnection connection = promise.sync().get();
-        assertEquals(1, requestConnCounter.count());
-        assertEquals(1, createNewConnCounter.count());
-        assertNotNull(currentPassport.findState(PassportState.ORIGIN_CH_CONNECTING));
-        assertNotNull(currentPassport.findState(PassportState.ORIGIN_CH_CONNECTED));
-        assertEquals(1, createConnSucceededCounter.count());
-        assertEquals(1, connsInUse.get());
+        assertThat(requestConnCounter.count()).isEqualTo(1);
+        assertThat(createNewConnCounter.count()).isEqualTo(1);
+        assertThat(currentPassport.findState(PassportState.ORIGIN_CH_CONNECTING))
+                .isNotNull();
+        assertThat(currentPassport.findState(PassportState.ORIGIN_CH_CONNECTED)).isNotNull();
+        assertThat(createConnSucceededCounter.count()).isEqualTo(1);
+        assertThat(connsInUse.get()).isEqualTo(1);
 
         // check state on PooledConnection - not all thread safe
         CLIENT_EVENT_LOOP
@@ -238,15 +234,15 @@ class PerServerConnectionPoolTest {
                 })
                 .sync();
 
-        assertEquals(1, connsInPool.get());
+        assertThat(connsInPool.get()).isEqualTo(1);
 
         CurrentPassport newPassport = CurrentPassport.create();
         Promise<PooledConnection> secondPromise = pool.acquire(CLIENT_EVENT_LOOP, newPassport, new AtomicReference<>());
 
         PooledConnection connection2 = secondPromise.sync().get();
-        assertEquals(connection, connection2);
-        assertEquals(2, requestConnCounter.count());
-        assertEquals(0, connsInPool.get());
+        assertThat(connection2).isEqualTo(connection);
+        assertThat(requestConnCounter.count()).isEqualTo(2);
+        assertThat(connsInPool.get()).isEqualTo(0);
 
         CLIENT_EVENT_LOOP
                 .submit(() -> {
@@ -275,12 +271,12 @@ class PerServerConnectionPoolTest {
         Promise<PooledConnection> secondPromise = pool.acquire(CLIENT_EVENT_LOOP, newPassport, new AtomicReference<>());
         PooledConnection connection2 = secondPromise.sync().get();
 
-        assertNotEquals(connection, connection2);
-        assertEquals(1, connTakenFromPoolIsNotOpen.count());
-        assertEquals(0, connsInPool.get());
-        assertTrue(
-                connection.getChannel().closeFuture().await(5, TimeUnit.SECONDS),
-                "Channel should have been closed by pool");
+        assertThat(connection).isNotEqualTo(connection2);
+        assertThat(connTakenFromPoolIsNotOpen.count()).isEqualTo(1);
+        assertThat(connsInPool.get()).isEqualTo(0);
+        assertThat(connection.getChannel().closeFuture().await(5, TimeUnit.SECONDS))
+                .as("Channel should have been closed by pool")
+                .isTrue();
     }
 
     @Test
@@ -293,13 +289,14 @@ class PerServerConnectionPoolTest {
         PooledConnection connection = promise.sync().get();
         CLIENT_EVENT_LOOP
                 .submit(() -> {
-                    assertFalse(pool.release(connection));
-                    assertEquals(1, closeAboveHighWaterMarkCounter.count());
-                    assertFalse(connection.isInPool());
+                    assertThat(pool.release(connection)).isFalse();
+                    assertThat(closeAboveHighWaterMarkCounter.count()).isEqualTo(1);
+                    assertThat(connection.isInPool()).isFalse();
                 })
                 .sync();
-        assertTrue(
-                connection.getChannel().closeFuture().await(5, TimeUnit.SECONDS), "connection should have been closed");
+        assertThat(connection.getChannel().closeFuture().await(5, TimeUnit.SECONDS))
+                .as("connection should have been closed")
+                .isTrue();
     }
 
     @Test
@@ -312,25 +309,25 @@ class PerServerConnectionPoolTest {
 
         CLIENT_EVENT_LOOP
                 .submit(() -> {
-                    assertFalse(connection.isInPool());
-                    assertTrue(
-                            connection.getChannel().isActive(), "connection was incorrectly closed during the drain");
+                    assertThat(connection.isInPool()).isFalse();
+                    assertThat(connection.getChannel().isActive())
+                            .as("connection was incorrectly closed during the drain")
+                            .isTrue();
                     pool.release(connection);
                 })
                 .sync();
 
-        assertTrue(
-                connection.getChannel().closeFuture().await(5, TimeUnit.SECONDS),
-                "connection should have been closed after release");
+        assertThat(connection.getChannel().closeFuture().await(5, TimeUnit.SECONDS))
+                .as("connection should have been closed after release")
+                .isTrue();
     }
 
     @Test
     void acquireWhileDraining() {
         pool.drain();
-        assertFalse(pool.isAvailable());
-        assertThrows(
-                IllegalStateException.class,
-                () -> pool.acquire(CLIENT_EVENT_LOOP, CurrentPassport.create(), new AtomicReference<>()));
+        assertThat(pool.isAvailable()).isFalse();
+        assertThatThrownBy(() -> pool.acquire(CLIENT_EVENT_LOOP, CurrentPassport.create(), new AtomicReference<>()))
+                .isInstanceOf(IllegalStateException.class);
     }
 
     @Test
@@ -346,13 +343,13 @@ class PerServerConnectionPoolTest {
         connections.add(connection2);
         connsInPool.set(2);
 
-        assertEquals(2, connsInPool.get());
+        assertThat(connsInPool.get()).isEqualTo(2);
         pool.drainIdleConnectionsOnEventLoop(channel1.eventLoop());
         channel1.runPendingTasks();
 
-        assertEquals(0, connsInPool.get());
-        assertTrue(connection1.getChannel().closeFuture().isSuccess());
-        assertTrue(connection2.getChannel().closeFuture().isSuccess());
+        assertThat(connsInPool.get()).isEqualTo(0);
+        assertThat(connection1.getChannel().closeFuture().isSuccess()).isTrue();
+        assertThat(connection2.getChannel().closeFuture().isSuccess()).isTrue();
     }
 
     @Test
@@ -363,10 +360,10 @@ class PerServerConnectionPoolTest {
         pool.handleConnectCompletion(
                 channel.newFailedFuture(new RuntimeException("runtime failure")), promise, CurrentPassport.create());
 
-        assertFalse(promise.isSuccess());
-        assertNotNull(promise.cause());
-        assertInstanceOf(OriginConnectException.class, promise.cause());
-        assertInstanceOf(RuntimeException.class, promise.cause().getCause(), "expect cause remains");
+        assertThat(promise.isSuccess()).isFalse();
+        assertThat(promise.cause()).isNotNull();
+        assertThat(promise.cause()).isInstanceOf(OriginConnectException.class);
+        assertThat(promise.cause().getCause()).as("expect cause remains").isInstanceOf(RuntimeException.class);
     }
 
     @Test
@@ -379,20 +376,22 @@ class PerServerConnectionPoolTest {
                 promise,
                 CurrentPassport.create());
 
-        assertFalse(promise.isSuccess());
-        assertNotNull(promise.cause());
-        assertInstanceOf(OriginConnectException.class, promise.cause());
-        assertInstanceOf(
-                SSLHandshakeException.class, promise.cause().getCause(), "expect decoder exception is unwrapped");
+        assertThat(promise.isSuccess()).isFalse();
+        assertThat(promise.cause()).isNotNull();
+        assertThat(promise.cause()).isInstanceOf(OriginConnectException.class);
+        assertThat(promise.cause().getCause())
+                .as("expect decoder exception is unwrapped")
+                .isInstanceOf(SSLHandshakeException.class);
     }
 
     private void checkChannelState(PooledConnection connection, CurrentPassport passport, int expectedUsage) {
         Channel channel = connection.getChannel();
-        assertEquals(expectedUsage, connection.getUsageCount());
-        assertEquals(passport, CurrentPassport.fromChannelOrNull(channel));
-        assertFalse(connection.isReleased());
-        assertEquals(ConnectionState.WRITE_BUSY, connection.getConnectionState());
-        assertNull(channel.pipeline().get(DefaultClientChannelManager.IDLE_STATE_HANDLER_NAME));
+        assertThat(connection.getUsageCount()).isEqualTo(expectedUsage);
+        assertThat(CurrentPassport.fromChannelOrNull(channel)).isEqualTo(passport);
+        assertThat(connection.isReleased()).isFalse();
+        assertThat(connection.getConnectionState()).isEqualTo(ConnectionState.WRITE_BUSY);
+        assertThat(channel.pipeline().get(DefaultClientChannelManager.IDLE_STATE_HANDLER_NAME))
+                .isNull();
     }
 
     private PooledConnection newPooledConnection(Channel ch) {

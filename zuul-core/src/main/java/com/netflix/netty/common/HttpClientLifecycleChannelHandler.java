@@ -24,6 +24,7 @@ import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.http.LastHttpContent;
+import io.netty.util.AttributeKey;
 
 /**
  * @author michaels
@@ -32,19 +33,25 @@ public class HttpClientLifecycleChannelHandler extends HttpLifecycleChannelHandl
     public static final ChannelHandler INBOUND_CHANNEL_HANDLER = new HttpClientLifecycleInboundChannelHandler();
     public static final ChannelHandler OUTBOUND_CHANNEL_HANDLER = new HttpClientLifecycleOutboundChannelHandler();
 
+    public static final AttributeKey<Boolean> ATTR_OUTBOUND_LAST_CONTENT_PENDING =
+            AttributeKey.newInstance("_outbound_last_content_pending");
+
     @ChannelHandler.Sharable
     private static class HttpClientLifecycleInboundChannelHandler extends ChannelInboundHandlerAdapter {
         @Override
         public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
-            if (msg instanceof HttpResponse) {
-                ctx.channel().attr(ATTR_HTTP_RESP).set((HttpResponse) msg);
+            if (msg instanceof HttpResponse httpResponse) {
+                ctx.channel().attr(ATTR_HTTP_RESP).set(httpResponse);
             }
 
             try {
                 super.channelRead(ctx, msg);
             } finally {
                 if (msg instanceof LastHttpContent) {
-                    fireCompleteEventIfNotAlready(ctx, CompleteReason.SESSION_COMPLETE);
+                    HttpResponse resp = ctx.channel().attr(ATTR_HTTP_RESP).get();
+                    if (!isInterimResponse(resp)) {
+                        fireCompleteEventIfNotAlready(ctx, CompleteReason.SESSION_COMPLETE);
+                    }
                 }
             }
         }
@@ -63,8 +70,18 @@ public class HttpClientLifecycleChannelHandler extends HttpLifecycleChannelHandl
     private static class HttpClientLifecycleOutboundChannelHandler extends ChannelOutboundHandlerAdapter {
         @Override
         public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
-            if (msg instanceof HttpRequest) {
-                fireStartEvent(ctx, (HttpRequest) msg);
+            if (msg instanceof HttpRequest httpRequest) {
+                ctx.channel().attr(ATTR_OUTBOUND_LAST_CONTENT_PENDING).set(Boolean.TRUE);
+                fireStartEvent(ctx, httpRequest);
+            }
+
+            if (msg instanceof LastHttpContent) {
+                // only clear after content write succeeds to account for retrans
+                promise.addListener(future -> {
+                    if (future.isSuccess()) {
+                        ctx.channel().attr(ATTR_OUTBOUND_LAST_CONTENT_PENDING).set(null);
+                    }
+                });
             }
 
             super.write(ctx, msg, promise);

@@ -23,6 +23,7 @@ import java.util.AbstractMap.SimpleImmutableEntry;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -30,8 +31,10 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.BiConsumer;
+import java.util.function.BiPredicate;
 import java.util.function.Predicate;
 import javax.annotation.Nullable;
+import lombok.NonNull;
 
 /**
  * An abstraction over a collection of http headers. Allows multiple headers with same name, and header names are
@@ -42,6 +45,12 @@ import javax.annotation.Nullable;
  */
 public final class Headers {
     private static final int ABSENT = -1;
+
+    /**
+     * A partial list of headers to collapse. Derived from <a href="https://github.com/envoyproxy/envoy/blob/32041077fdaf7b8396f5ed95e63812a53619ed61/envoy/http/header_map.h#L180-L267">envoy's inline headers</a>.
+     */
+    private static final Set<String> COLLAPSE_HEADER_NAMES =
+            Set.of("content-type", "host", "content-length", "user-agent", "upgrade", "expect", "grpc-timeout");
 
     private final List<String> originalNames;
     private final List<String> names;
@@ -92,16 +101,6 @@ public final class Headers {
         return getFirstNormal(normalName);
     }
 
-    @Nullable
-    private String getFirstNormal(String name) {
-        for (int i = 0; i < size(); i++) {
-            if (name(i).equals(name)) {
-                return value(i);
-            }
-        }
-        return null;
-    }
-
     /**
      * Get the first value found for this key even if there are multiple. If none, then
      * return the specified defaultValue.
@@ -126,6 +125,16 @@ public final class Headers {
             return value;
         }
         return defaultValue;
+    }
+
+    @Nullable
+    private String getFirstNormal(String name) {
+        for (int i = 0; i < size(); i++) {
+            if (name(i).equals(name)) {
+                return value(i);
+            }
+        }
+        return null;
     }
 
     /**
@@ -162,6 +171,17 @@ public final class Headers {
     }
 
     /**
+     * Iterates over the header entries with the given consumer. The first argument will be the original
+     * (non-normalised) header name as returned by {@link HeaderName#getName()}, the second the value. Do not
+     * modify the headers during iteration.
+     */
+    public void forEach(BiConsumer<? super String, ? super String> entryConsumer) {
+        for (int i = 0; i < size(); i++) {
+            entryConsumer.accept(originalName(i), value(i));
+        }
+    }
+
+    /**
      * Iterates over the header entries with the given consumer.  The first argument will be the normalised header
      * name as returned by {@link HeaderName#getNormalised()}.  The second argument will be the value.  Do not modify
      * the headers during iteration.
@@ -170,6 +190,19 @@ public final class Headers {
         for (int i = 0; i < size(); i++) {
             entryConsumer.accept(name(i), value(i));
         }
+    }
+
+    /**
+     * Returns {@code true} if any header entry matches the predicate, stopping at the first match. The first
+     * argument is the normalised header name as returned by {@link HeaderName#getNormalised()}, the second the value.
+     */
+    public boolean anyMatchNormalised(BiPredicate<? super String, ? super String> predicate) {
+        for (int i = 0; i < size(); i++) {
+            if (predicate.test(name(i), value(i))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -205,6 +238,18 @@ public final class Headers {
     }
 
     /**
+     * Replace any/all entries with this key, with this single entry and validate.
+     *
+     * If value is {@code null}, then not added, but any existing header of same name is removed.
+     *
+     * @throws ZuulException on invalid name or value
+     */
+    public void setAndValidate(HeaderName headerName, String value) {
+        String normalName = Objects.requireNonNull(headerName, "headerName").getNormalised();
+        setNormal(validateField(headerName.getName()), validateField(normalName), validateField(value));
+    }
+
+    /**
      * Replace any/all entries with this key, with this single entry if the key and entry are valid.
      *
      * If value is {@code null}, then not added, but any existing header of same name is removed.
@@ -230,18 +275,6 @@ public final class Headers {
         }
     }
 
-    /**
-     * Replace any/all entries with this key, with this single entry and validate.
-     *
-     * If value is {@code null}, then not added, but any existing header of same name is removed.
-     *
-     * @throws ZuulException on invalid name or value
-     */
-    public void setAndValidate(HeaderName headerName, String value) {
-        String normalName = Objects.requireNonNull(headerName, "headerName").getNormalised();
-        setNormal(validateField(headerName.getName()), validateField(normalName), validateField(value));
-    }
-
     private void setNormal(String originalName, String normalName, @Nullable String value) {
         int i = findNormal(normalName);
         if (i == ABSENT) {
@@ -262,12 +295,19 @@ public final class Headers {
      * Returns the first index entry that has a matching name.  Returns {@link #ABSENT} if absent.
      */
     private int findNormal(String normalName) {
-        for (int i = 0; i < size(); i++) {
+        return findNormal(normalName, size());
+    }
+
+    /**
+     * Returns the first index before {@code limit} that has a matching name, or {@link #ABSENT}.
+     */
+    private int findNormal(String normalName, int limit) {
+        for (int i = 0; i < limit; i++) {
             if (name(i).equals(normalName)) {
                 return i;
             }
         }
-        return -1;
+        return ABSENT;
     }
 
     /**
@@ -349,7 +389,7 @@ public final class Headers {
     public boolean setIfAbsentAndValid(HeaderName headerName, String value) {
         Objects.requireNonNull(value, "value");
         Objects.requireNonNull(headerName, "headerName");
-        if (isValid(headerName.getName()) && isValid((value))) {
+        if (isValid(headerName.getName()) && isValid(value)) {
             String normalName = headerName.getNormalised();
             return setIfAbsentNormal(headerName.getName(), normalName, value);
         }
@@ -430,6 +470,65 @@ public final class Headers {
     }
 
     /**
+     * Replaces all values for each name present in entries with the values from entries, leaving
+     * names absent from entries untouched. Multiple values per name are preserved, so unlike
+     * repeated set(...) calls this does not collapse multi-valued headers such as Set-Cookie.
+     */
+    public void setAll(@NonNull Iterable<? extends Map.Entry<String, String>> entries) {
+        int existing = size();
+        Set<String> replacedNames = new HashSet<>();
+        for (Map.Entry<String, String> entry : entries) {
+            String normalName = HeaderName.normalize(entry.getKey());
+            replacedNames.add(normalName);
+            addNormal(entry.getKey(), normalName, entry.getValue());
+        }
+
+        if (size() == existing) {
+            return;
+        }
+
+        // compact away the pre-existing entries we just replaced, keeping the newly appended ones
+        int w = 0;
+        for (int r = 0; r < size(); r++) {
+            if (r < existing && replacedNames.contains(name(r))) {
+                continue;
+            }
+
+            originalName(w, originalName(r));
+            name(w, name(r));
+            value(w, value(r));
+            w++;
+        }
+
+        truncate(w);
+    }
+
+    /**
+     * Collapses each {@link #COLLAPSE_HEADER_NAMES} entry that appears more than once to a single entry
+     * holding its last value, matching the last-write-wins rule of set(...).
+     *
+     * @return true if any header was collapsed
+     */
+    public boolean collapseMultiValuedHeaders() {
+        int distinct = 0;
+        for (int i = 0; i < size(); i++) {
+            int seen = COLLAPSE_HEADER_NAMES.contains(name(i)) ? findNormal(name(i), distinct) : ABSENT;
+            if (seen == ABSENT) {
+                originalName(distinct, originalName(i));
+                name(distinct, name(i));
+                value(distinct, value(i));
+                distinct++;
+            } else {
+                value(seen, value(i)); // last value wins
+            }
+        }
+
+        boolean collapsed = distinct < size();
+        truncate(distinct);
+        return collapsed;
+    }
+
+    /**
      * Removes the header entries that match the given header name, and returns them as a list.
      */
     public List<String> remove(String headerName) {
@@ -463,6 +562,31 @@ public final class Headers {
         int w = 0;
         for (int r = 0; r < size(); r++) {
             if (filter.test(new SimpleImmutableEntry<>(new HeaderName(originalName(r), name(r)), value(r)))) {
+                removed = true;
+            } else {
+                originalName(w, originalName(r));
+                name(w, name(r));
+                value(w, value(r));
+                w++;
+            }
+        }
+        truncate(w);
+        return removed;
+    }
+
+    /**
+     * Removes all header entries for which the predicate returns {@code true}. The first argument is the normalised
+     * header name as returned by {@link HeaderName#getNormalised()}, the second the value. Do not access the headers
+     * from inside the {@link BiPredicate#test} body.
+     *
+     * @return if any elements were removed.
+     */
+    public boolean removeAllNormalised(BiPredicate<? super String, ? super String> filter) {
+        Objects.requireNonNull(filter, "filter");
+        boolean removed = false;
+        int w = 0;
+        for (int r = 0; r < size(); r++) {
+            if (filter.test(name(r), value(r))) {
                 removed = true;
             } else {
                 originalName(w, originalName(r));
@@ -573,10 +697,9 @@ public final class Headers {
         if (obj == this) {
             return true;
         }
-        if (!(obj instanceof Headers)) {
+        if (!(obj instanceof Headers other)) {
             return false;
         }
-        Headers other = (Headers) obj;
 
         return asMap().equals(other.asMap());
     }

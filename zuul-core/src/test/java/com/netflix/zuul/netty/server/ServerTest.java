@@ -16,21 +16,23 @@
 
 package com.netflix.zuul.netty.server;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Mockito.mock;
 
 import com.netflix.config.ConfigurationManager;
 import com.netflix.netty.common.metrics.EventLoopGroupMetrics;
 import com.netflix.netty.common.status.ServerStatusManager;
+import com.netflix.spectator.api.Counter;
+import com.netflix.spectator.api.DefaultRegistry;
 import com.netflix.spectator.api.NoopRegistry;
+import com.netflix.spectator.api.Registry;
 import com.netflix.spectator.api.Spectator;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.group.DefaultChannelGroup;
+import io.netty.channel.socket.ServerSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.util.concurrent.GlobalEventExecutor;
 import java.io.OutputStream;
@@ -52,12 +54,13 @@ import org.slf4j.LoggerFactory;
 /**
  * Tests for {@link Server}.
  */
+@SuppressWarnings("AddressSelection")
 class ServerTest {
     private static final Logger LOGGER = LoggerFactory.getLogger(ServerTest.class);
 
     @BeforeEach
     void beforeTest() {
-        final AbstractConfiguration config = ConfigurationManager.getConfigInstance();
+        AbstractConfiguration config = ConfigurationManager.getConfigInstance();
         config.setProperty("zuul.server.netty.socket.force_nio", "true");
         config.setProperty("zuul.server.netty.socket.force_io_uring", "false");
     }
@@ -66,10 +69,10 @@ class ServerTest {
     void getListeningSockets() throws Exception {
         ServerStatusManager ssm = mock(ServerStatusManager.class);
         Map<NamedSocketAddress, ChannelInitializer<?>> initializers = new HashMap<>();
-        final List<NioSocketChannel> nioChannels = Collections.synchronizedList(new ArrayList<NioSocketChannel>());
+        List<NioSocketChannel> nioChannels = Collections.synchronizedList(new ArrayList<NioSocketChannel>());
         ChannelInitializer<Channel> init = new ChannelInitializer<Channel>() {
             @Override
-            protected void initChannel(final Channel ch) {
+            protected void initChannel(Channel ch) {
                 LOGGER.info("Channel: {}, isActive={}, isOpen={}", ch.getClass().getName(), ch.isActive(), ch.isOpen());
                 if (ch instanceof NioSocketChannel) {
                     nioChannels.add((NioSocketChannel) ch);
@@ -94,31 +97,115 @@ class ServerTest {
             public int acceptorCount() {
                 return 1;
             }
+
+            @Override
+            public int getBacklogSize() {
+                return 1024;
+            }
         };
         Server s = new Server(new NoopRegistry(), ssm, initializers, ccs, elgm, elc);
         s.start();
 
         List<NamedSocketAddress> addrs = s.getListeningAddresses();
-        assertEquals(2, addrs.size());
+        assertThat(addrs.size()).isEqualTo(2);
         for (NamedSocketAddress address : addrs) {
-            assertTrue(address.unwrap() instanceof InetSocketAddress);
-            final int port = ((InetSocketAddress) address.unwrap()).getPort();
-            assertNotEquals(0, port);
+            assertThat(address.unwrap() instanceof InetSocketAddress).isTrue();
+            int port = ((InetSocketAddress) address.unwrap()).getPort();
+            assertThat(port).isNotEqualTo(0);
             checkConnection(port);
         }
 
         await().atMost(1, TimeUnit.SECONDS).until(() -> nioChannels.size() == 2);
 
+        nioChannels.stream()
+                .map(NioSocketChannel::parent)
+                .map(ServerSocketChannel::config)
+                .forEach(config -> assertThat(config.getBacklog()).isEqualTo(elc.getBacklogSize()));
+
         s.stop();
 
-        assertEquals(2, nioChannels.size());
+        assertThat(nioChannels.size()).isEqualTo(2);
 
         for (NioSocketChannel ch : nioChannels) {
-            assertTrue(ch.isShutdown(), "isShutdown");
+            assertThat(ch.isShutdown()).as("isShutdown").isTrue();
         }
     }
 
-    private static void checkConnection(final int port) {
+    @Test
+    void acceptorMetricsAreRegistered() throws Exception {
+        Registry registry = new DefaultRegistry();
+        ServerStatusManager ssm = mock(ServerStatusManager.class);
+        Map<NamedSocketAddress, ChannelInitializer<?>> initializers = new HashMap<>();
+        ChannelInitializer<Channel> init = new ChannelInitializer<>() {
+            @Override
+            protected void initChannel(Channel ch) {}
+        };
+        initializers.put(new NamedSocketAddress("test", new InetSocketAddress(0)), init);
+
+        ClientConnectionsShutdown ccs = new ClientConnectionsShutdown(
+                new DefaultChannelGroup(GlobalEventExecutor.INSTANCE), GlobalEventExecutor.INSTANCE, null);
+        EventLoopGroupMetrics elgm = new EventLoopGroupMetrics(Spectator.globalRegistry());
+        EventLoopConfig elc = new EventLoopConfig() {
+            @Override
+            public int eventLoopCount() {
+                return 1;
+            }
+
+            @Override
+            public int acceptorCount() {
+                return 1;
+            }
+
+            @Override
+            public int getBacklogSize() {
+                return 1024;
+            }
+        };
+
+        Server s = new Server(registry, ssm, initializers, ccs, elgm, elc);
+        s.start();
+
+        List<NamedSocketAddress> addrs = s.getListeningAddresses();
+        int port = ((InetSocketAddress) addrs.getFirst().unwrap()).getPort();
+
+        checkConnection(port);
+        checkConnection(port);
+
+        await().atMost(1, TimeUnit.SECONDS).until(() -> {
+            Counter counter = registry.counter("zuul.conn.acceptor.accepts", "port", String.valueOf(port));
+            return counter.count() >= 2;
+        });
+
+        s.stop();
+    }
+
+    @Test
+    void noShutdownHookWhenNullPassedIn() {
+        Server server = new Server(
+                new NoopRegistry(),
+                mock(ServerStatusManager.class),
+                Map.of(),
+                mock(ClientConnectionsShutdown.class),
+                mock(EventLoopGroupMetrics.class),
+                mock(EventLoopConfig.class),
+                null);
+        assertThat(server.getJvmShutdownHook()).isNull();
+    }
+
+    @Test
+    void shutdownHookAddedByDefault() {
+        Server server = new Server(
+                new NoopRegistry(),
+                mock(ServerStatusManager.class),
+                Map.of(),
+                mock(ClientConnectionsShutdown.class),
+                mock(EventLoopGroupMetrics.class),
+                mock(EventLoopConfig.class));
+        assertThat(server.getJvmShutdownHook()).isNotNull();
+    }
+
+    @SuppressWarnings("EmptyCatch")
+    private static void checkConnection(int port) {
         Socket sock = null;
         try {
             InetSocketAddress socketAddress = new InetSocketAddress("127.0.0.1", port);

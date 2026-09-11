@@ -16,12 +16,10 @@
 
 package com.netflix.zuul.netty.server.http2;
 
-import com.google.common.base.Preconditions;
-import com.netflix.netty.common.Http2ConnectionCloseHandler;
-import com.netflix.netty.common.Http2ConnectionExpiryHandler;
 import com.netflix.netty.common.SwallowSomeHttp2ExceptionsHandler;
 import com.netflix.netty.common.channel.config.ChannelConfig;
 import com.netflix.netty.common.channel.config.CommonChannelConfigKeys;
+import com.netflix.netty.common.close.Http2ConnectionExpiryHandler;
 import com.netflix.netty.common.metrics.Http2MetricsChannelHandlers;
 import com.netflix.netty.common.ssl.ServerSslConfig;
 import com.netflix.zuul.logging.Http2FrameLoggingPerClientIpHandler;
@@ -32,6 +30,7 @@ import io.netty.channel.ChannelPipeline;
 import io.netty.channel.group.ChannelGroup;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslHandler;
+import lombok.NonNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -48,7 +47,7 @@ public final class Http2SslChannelInitializer extends BaseZuulChannelInitializer
     private final SslContext sslContext;
     private final boolean isSSlFromIntermediary;
     private final SwallowSomeHttp2ExceptionsHandler swallowSomeHttp2ExceptionsHandler;
-    private final String metricId;
+    private final String http2SslMetricId;
 
     /**
      * Use {@link #Http2SslChannelInitializer(String, ChannelConfig, ChannelConfig, ChannelGroup)} instead.
@@ -60,9 +59,12 @@ public final class Http2SslChannelInitializer extends BaseZuulChannelInitializer
     }
 
     public Http2SslChannelInitializer(
-            String metricId, ChannelConfig channelConfig, ChannelConfig channelDependencies, ChannelGroup channels) {
+            @NonNull String metricId,
+            ChannelConfig channelConfig,
+            ChannelConfig channelDependencies,
+            ChannelGroup channels) {
         super(metricId, channelConfig, channelDependencies, channels);
-        this.metricId = Preconditions.checkNotNull(metricId, "metricId");
+        this.http2SslMetricId = metricId;
 
         this.swallowSomeHttp2ExceptionsHandler = new SwallowSomeHttp2ExceptionsHandler(registry);
 
@@ -74,15 +76,9 @@ public final class Http2SslChannelInitializer extends BaseZuulChannelInitializer
     }
 
     @Override
-    protected void initChannel(Channel ch) throws Exception {
+    protected void initChannel(Channel ch) {
         SslHandler sslHandler = sslContext.newHandler(ch.alloc());
         sslHandler.engine().setEnabledProtocols(serverSslConfig.getProtocols());
-
-        //        SSLParameters sslParameters = new SSLParameters();
-        //        AlgorithmConstraints algoConstraints = new AlgorithmConstraints();
-        //        sslParameters.setAlgorithmConstraints(algoConstraints);
-        //        sslParameters.setUseCipherSuitesOrder(true);
-        //        sslHandler.engine().setSSLParameters(sslParameters);
 
         if (LOG.isDebugEnabled()) {
             LOG.debug(
@@ -113,21 +109,16 @@ public final class Http2SslChannelInitializer extends BaseZuulChannelInitializer
         addSslClientCertChecks(pipeline);
 
         Http2MetricsChannelHandlers http2MetricsChannelHandlers =
-                new Http2MetricsChannelHandlers(registry, "server", "http2-" + metricId);
+                new Http2MetricsChannelHandlers(registry, "server", "http2-" + http2SslMetricId);
 
-        Http2ConnectionCloseHandler connectionCloseHandler = new Http2ConnectionCloseHandler(registry);
-        Http2ConnectionExpiryHandler connectionExpiryHandler = new Http2ConnectionExpiryHandler(
-                maxRequestsPerConnection, maxRequestsPerConnectionInBrownout, connectionExpiry);
+        Http2ConnectionExpiryHandler connectionExpiryHandler =
+                new Http2ConnectionExpiryHandler(maxRequestsPerConnection, connectionExpiry);
 
         pipeline.addLast(
                 "http2CodecSwapper",
                 new Http2OrHttpHandler(
                         new Http2StreamInitializer(
-                                ch,
-                                this::http1Handlers,
-                                http2MetricsChannelHandlers,
-                                connectionCloseHandler,
-                                connectionExpiryHandler),
+                                ch, this::http1Handlers, http2MetricsChannelHandlers, connectionExpiryHandler),
                         channelConfig,
                         cp -> {
                             http1Codec(cp);
@@ -138,12 +129,12 @@ public final class Http2SslChannelInitializer extends BaseZuulChannelInitializer
         pipeline.addLast(swallowSomeHttp2ExceptionsHandler);
     }
 
-    protected void http1Handlers(ChannelPipeline pipeline) {
+    private void http1Handlers(ChannelPipeline pipeline) {
         addHttpRelatedHandlers(pipeline);
         addZuulHandlers(pipeline);
     }
 
-    protected void http1Codec(ChannelPipeline pipeline) {
+    private void http1Codec(ChannelPipeline pipeline) {
         pipeline.replace("codec_placeholder", HTTP_CODEC_HANDLER_NAME, createHttpServerCodec());
     }
 }

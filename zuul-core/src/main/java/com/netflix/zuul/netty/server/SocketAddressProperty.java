@@ -84,6 +84,7 @@ public final class SocketAddressProperty extends StringDerivedProperty<SocketAdd
         UDS,
         ;
 
+        @SuppressWarnings("ImmutableEnumChecker") // Hopes and prayers that addressSupplier returns a constant.
         @Nullable
         private final Supplier<? extends InetAddress> addressSupplier;
 
@@ -121,46 +122,31 @@ public final class SocketAddressProperty extends StringDerivedProperty<SocketAdd
             BindType bindType = BindType.valueOf(rawBindType.toUpperCase(Locale.ROOT));
             String rawAddress = input.substring(equalsPosition + 1);
             int port;
-            parsePort:
-            {
-                switch (bindType) {
-                    case ANY: // fallthrough
-                    case IPV4_ANY: // fallthrough
-                    case IPV6_ANY: // fallthrough
-                    case ANY_LOCAL: // fallthrough
-                    case IPV4_LOCAL: // fallthrough
-                    case IPV6_LOCAL: // fallthrough
-                        try {
-                            port = Integer.parseInt(rawAddress);
-                        } catch (NumberFormatException e) {
-                            throw new IllegalArgumentException("Invalid Port " + input, e);
-                        }
-                        break parsePort;
-                    case UDS:
-                        port = -1;
-                        break parsePort;
+
+            switch (bindType) {
+                case ANY, IPV4_ANY, IPV6_ANY, ANY_LOCAL, IPV4_LOCAL, IPV6_LOCAL -> {
+                    try {
+                        port = Integer.parseInt(rawAddress);
+                    } catch (NumberFormatException e) {
+                        throw new IllegalArgumentException("Invalid Port " + input, e);
+                    }
                 }
-                throw new AssertionError("Missed cased: " + bindType);
+                case UDS -> port = -1;
+                default -> throw new AssertionError("Missed cased: " + bindType);
             }
 
             switch (bindType) {
-                case ANY:
+                case ANY -> {
                     return new InetSocketAddress(port);
-                case IPV4_ANY: // fallthrough
-                case IPV6_ANY: // fallthrough
-                case ANY_LOCAL: // fallthrough
-                case IPV4_LOCAL: // fallthrough
-                case IPV6_LOCAL: // fallthrough
+                }
+                case IPV4_ANY, IPV6_ANY, ANY_LOCAL, IPV4_LOCAL, IPV6_LOCAL -> {
                     return new InetSocketAddress(bindType.addressSupplier.get(), port);
-                case UDS:
+                }
+                case UDS -> {
                     return new DomainSocketAddress(rawAddress);
+                }
             }
             throw new AssertionError("Missed cased: " + bindType);
-        }
-
-        @Override
-        public boolean equals(Object object) {
-            return false;
         }
     }
 

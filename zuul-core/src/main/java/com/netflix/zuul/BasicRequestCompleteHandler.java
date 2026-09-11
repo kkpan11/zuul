@@ -20,8 +20,8 @@ import com.netflix.zuul.context.SessionContext;
 import com.netflix.zuul.message.http.HttpRequestInfo;
 import com.netflix.zuul.message.http.HttpResponseMessage;
 import com.netflix.zuul.stats.RequestMetricsPublisher;
+import jakarta.inject.Inject;
 import javax.annotation.Nullable;
-import javax.inject.Inject;
 
 /**
  * User: michaels@netflix.com

@@ -15,15 +15,17 @@
  */
 package com.netflix.zuul.netty.server.push;
 
+import jakarta.inject.Inject;
+import jakarta.inject.Singleton;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import javax.annotation.Nullable;
-import javax.inject.Inject;
-import javax.inject.Singleton;
 
 /**
  * Maintains client identity to web socket or SSE channel mapping.
@@ -43,12 +45,16 @@ public class PushConnectionRegistry {
     }
 
     @Nullable
-    public PushConnection get(final String clientId) {
+    public PushConnection get(String clientId) {
         return clientPushConnectionMap.get(clientId);
     }
 
     public List<PushConnection> getAll() {
         return new ArrayList<>(clientPushConnectionMap.values());
+    }
+
+    public Map<String, PushConnection> getAllEntries() {
+        return Collections.unmodifiableMap(clientPushConnectionMap);
     }
 
     public String mintNewSecureToken() {
@@ -57,13 +63,13 @@ public class PushConnectionRegistry {
         return Base64.getUrlEncoder().encodeToString(tokenBuffer);
     }
 
-    public void put(final String clientId, final PushConnection pushConnection) {
+    public void put(String clientId, PushConnection pushConnection) {
         pushConnection.setSecureToken(mintNewSecureToken());
         clientPushConnectionMap.put(clientId, pushConnection);
     }
 
-    public PushConnection remove(final String clientId) {
-        final PushConnection pc = clientPushConnectionMap.remove(clientId);
+    public PushConnection remove(String clientId) {
+        PushConnection pc = clientPushConnectionMap.remove(clientId);
         return pc;
     }
 

@@ -31,16 +31,12 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class InstrumentedResourceLeakDetector<T> extends ResourceLeakDetector<T> {
 
-    private final AtomicInteger instancesLeakCounter;
-
     @VisibleForTesting
     final AtomicInteger leakCounter;
 
     public InstrumentedResourceLeakDetector(Class<?> resourceType, int samplingInterval) {
         super(resourceType, samplingInterval);
 
-        this.instancesLeakCounter = SpectatorUtils.newGauge(
-                "NettyLeakDetector_instances", resourceType.getSimpleName(), new AtomicInteger());
         this.leakCounter =
                 SpectatorUtils.newGauge("NettyLeakDetector", resourceType.getSimpleName(), new AtomicInteger());
     }
@@ -72,8 +68,8 @@ public class InstrumentedResourceLeakDetector<T> extends ResourceLeakDetector<T>
             Field reportedLeaks = ResourceLeakDetector.class.getDeclaredField("reportedLeaks");
             reportedLeaks.setAccessible(true);
             Object f = reportedLeaks.get(this);
-            if (f instanceof Map) {
-                ((Map) f).clear();
+            if (f instanceof Map map) {
+                map.clear();
             }
         } catch (Throwable t) {
             // do nothing

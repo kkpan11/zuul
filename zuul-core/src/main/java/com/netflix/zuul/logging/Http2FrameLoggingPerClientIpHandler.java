@@ -27,7 +27,8 @@ import io.netty.channel.ChannelInboundHandlerAdapter;
  * through an ELB TCP Listener. And not through FTL either.
  */
 public class Http2FrameLoggingPerClientIpHandler extends ChannelInboundHandlerAdapter {
-    private static DynamicStringSetProperty IPS = new DynamicStringSetProperty("server.http2.frame.logging.ips", "");
+    private static final DynamicStringSetProperty IPS =
+            new DynamicStringSetProperty("server.http2.frame.logging.ips", "");
 
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
@@ -37,7 +38,7 @@ public class Http2FrameLoggingPerClientIpHandler extends ChannelInboundHandlerAd
                     .get();
 
             if (IPS.get().contains(clientIP)) {
-                ctx.channel().attr(DynamicHttp2FrameLogger.ATTR_ENABLE).set(Boolean.TRUE);
+                ctx.channel().attr(DynamicHttp2FrameLogger.ATTR_ENABLE).set(true);
                 ctx.pipeline().remove(this);
             }
         } finally {

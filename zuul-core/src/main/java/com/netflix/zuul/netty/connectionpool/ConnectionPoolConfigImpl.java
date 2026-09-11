@@ -21,10 +21,12 @@ import com.netflix.client.config.IClientConfig;
 import com.netflix.client.config.IClientConfigKey;
 import com.netflix.zuul.origins.OriginName;
 import java.util.Objects;
+import org.jspecify.annotations.NullMarked;
 
 /**
  * Created by saroskar on 3/24/16.
  */
+@NullMarked
 public class ConnectionPoolConfigImpl implements ConnectionPoolConfig {
 
     static final int DEFAULT_BUFFER_SIZE = 32 * 1024;
@@ -33,6 +35,7 @@ public class ConnectionPoolConfigImpl implements ConnectionPoolConfig {
     static final int DEFAULT_MAX_CONNS_PER_HOST = 50;
     static final int DEFAULT_PER_SERVER_WATERLINE = 4;
     static final int DEFAULT_MAX_REQUESTS_PER_CONNECTION = 1000;
+    static final boolean DEFAULT_TCP_NO_DELAY = true;
 
     // TODO(argha-c): Document why these values were chosen, as opposed to defaults of 32k/64k
     static final int DEFAULT_WRITE_BUFFER_HIGH_WATER_MARK = 32 * 1024;
@@ -62,10 +65,13 @@ public class ConnectionPoolConfigImpl implements ConnectionPoolConfig {
     public static final IClientConfigKey<Integer> WRITE_BUFFER_LOW_WATER_MARK =
             new CommonClientConfigKey<>("WriteBufferLowWaterMark") {};
 
+    public static final IClientConfigKey<Boolean> USE_DEFAULT_TCP_BUFFER_SIZES =
+            new CommonClientConfigKey<>("UseDefaultTcpBufferSizes") {};
+
     private final OriginName originName;
     private final IClientConfig clientConfig;
 
-    public ConnectionPoolConfigImpl(final OriginName originName, IClientConfig clientConfig) {
+    public ConnectionPoolConfigImpl(OriginName originName, IClientConfig clientConfig) {
         this.originName = Objects.requireNonNull(originName, "originName");
         this.clientConfig = clientConfig;
     }
@@ -109,7 +115,7 @@ public class ConnectionPoolConfigImpl implements ConnectionPoolConfig {
 
     @Override
     public boolean getTcpNoDelay() {
-        return clientConfig.getPropertyAsBoolean(TCP_NO_DELAY, false);
+        return clientConfig.getPropertyAsBoolean(TCP_NO_DELAY, DEFAULT_TCP_NO_DELAY);
     }
 
     @Override
@@ -120,6 +126,11 @@ public class ConnectionPoolConfigImpl implements ConnectionPoolConfig {
     @Override
     public int getTcpSendBufferSize() {
         return clientConfig.getPropertyAsInteger(IClientConfigKey.Keys.SendBufferSize, DEFAULT_BUFFER_SIZE);
+    }
+
+    @Override
+    public boolean useDefaultTcpBufferSizes() {
+        return clientConfig.getPropertyAsBoolean(USE_DEFAULT_TCP_BUFFER_SIZES, false);
     }
 
     @Override

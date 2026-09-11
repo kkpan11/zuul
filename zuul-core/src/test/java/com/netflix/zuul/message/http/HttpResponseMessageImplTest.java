@@ -16,9 +16,7 @@
 
 package com.netflix.zuul.message.http;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import com.netflix.zuul.context.SessionContext;
 import com.netflix.zuul.message.Headers;
@@ -58,9 +56,9 @@ class HttpResponseMessageImplTest {
                         "Set-Cookie",
                         "c2=4567; Max-Age=-1; Expires=Tue, 01 Sep 2015 22:49:57 GMT; Path=/; Domain=.netflix.com");
 
-        assertTrue(response.hasSetCookieWithName("c1"));
-        assertTrue(response.hasSetCookieWithName("c2"));
-        assertFalse(response.hasSetCookieWithName("XX"));
+        assertThat(response.hasSetCookieWithName("c1")).isTrue();
+        assertThat(response.hasSetCookieWithName("c2")).isTrue();
+        assertThat(response.hasSetCookieWithName("XX")).isFalse();
     }
 
     @Test
@@ -76,19 +74,48 @@ class HttpResponseMessageImplTest {
 
         response.removeExistingSetCookie("c1");
 
-        assertEquals(1, response.getHeaders().size());
-        assertFalse(response.hasSetCookieWithName("c1"));
-        assertTrue(response.hasSetCookieWithName("c2"));
+        assertThat(response.getHeaders().size()).isEqualTo(1);
+        assertThat(response.hasSetCookieWithName("c1")).isFalse();
+        assertThat(response.hasSetCookieWithName("c2")).isTrue();
+    }
+
+    @Test
+    void removeExistingSetCookieReportsWhetherAnyWereRemovedAndKeepsOtherHeaders() {
+        response.getHeaders().add("Set-Cookie", "c1=1234; Path=/");
+        response.getHeaders().add("X-Other", "keep");
+
+        assertThat(response.removeExistingSetCookie("c1")).isTrue();
+        assertThat(response.removeExistingSetCookie("c1")).isFalse();
+        assertThat(response.getHeaders().getFirst("X-Other")).isEqualTo("keep");
+    }
+
+    @Test
+    void removeExistingSetCookieOnlyMatchesTheExactCookieNamePrefix() {
+        response.getHeaders().add("Set-Cookie", "c1=1234; Path=/");
+        response.getHeaders().add("Set-Cookie", "c12=5678; Path=/");
+
+        response.removeExistingSetCookie("c1");
+
+        assertThat(response.hasSetCookieWithName("c1")).isFalse();
+        assertThat(response.hasSetCookieWithName("c12")).isTrue();
+    }
+
+    @Test
+    void removeExistingSetCookieMatchesSetCookieHeaderCaseInsensitively() {
+        response.getHeaders().add("set-cookie", "c1=1234; Path=/");
+
+        assertThat(response.removeExistingSetCookie("c1")).isTrue();
+        assertThat(response.hasSetCookieWithName("c1")).isFalse();
     }
 
     @Test
     void testContentLengthHeaderHasCorrectValue() {
-        assertEquals(0, response.getHeaders().getAll("Content-Length").size());
+        assertThat(response.getHeaders().getAll("Content-Length").size()).isEqualTo(0);
 
         response.setBodyAsText(TEXT1);
-        assertEquals(String.valueOf(TEXT1.length()), response.getHeaders().getFirst("Content-Length"));
+        assertThat(response.getHeaders().getFirst("Content-Length")).isEqualTo(String.valueOf(TEXT1.length()));
 
         response.setBody(TEXT2.getBytes(StandardCharsets.UTF_8));
-        assertEquals(String.valueOf(TEXT2.length()), response.getHeaders().getFirst("Content-Length"));
+        assertThat(response.getHeaders().getFirst("Content-Length")).isEqualTo(String.valueOf(TEXT2.length()));
     }
 }

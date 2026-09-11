@@ -62,9 +62,9 @@ public class MaxInboundConnectionsHandler extends ChannelInboundHandlerAdapter {
                         "Throttling incoming connection as above configured max connections threshold of {}",
                         maxConnections);
                 Channel channel = ctx.channel();
-                channel.attr(ATTR_CH_THROTTLED).set(Boolean.TRUE);
+                channel.attr(ATTR_CH_THROTTLED).set(true);
                 CurrentPassport.fromChannel(channel).add(PassportState.SERVER_CH_THROTTLING);
-                channel.close();
+                ctx.close();
                 connectionThrottled.increment();
             }
         }

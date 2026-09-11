@@ -16,72 +16,69 @@
 
 package com.netflix.zuul;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.google.common.truth.Truth;
-import com.netflix.zuul.Attrs.Key;
 import org.junit.jupiter.api.Test;
 
 class AttrsTest {
     @Test
     void keysAreUnique() {
         Attrs attrs = Attrs.newInstance();
-        Key<String> key1 = Attrs.newKey("foo");
+        Attrs.Key<String> key1 = Attrs.newKey("foo");
         key1.put(attrs, "bar");
-        Key<String> key2 = Attrs.newKey("foo");
+        Attrs.Key<String> key2 = Attrs.newKey("foo");
         key2.put(attrs, "baz");
 
-        Truth.assertThat(attrs.keySet()).containsExactly(key1, key2);
+        assertThat(attrs.keySet()).containsExactlyInAnyOrder(key1, key2);
     }
 
     @Test
     void newKeyFailsOnNull() {
-        assertThrows(NullPointerException.class, () -> Attrs.newKey(null));
+        assertThatThrownBy(() -> Attrs.newKey(null)).isInstanceOf(NullPointerException.class);
     }
 
     @Test
     void attrsPutFailsOnNull() {
         Attrs attrs = Attrs.newInstance();
-        Key<String> key = Attrs.newKey("foo");
+        Attrs.Key<String> key = Attrs.newKey("foo");
 
-        assertThrows(NullPointerException.class, () -> key.put(attrs, null));
+        assertThatThrownBy(() -> key.put(attrs, null)).isInstanceOf(NullPointerException.class);
     }
 
     @Test
     void attrsPutReplacesOld() {
         Attrs attrs = Attrs.newInstance();
-        Key<String> key = Attrs.newKey("foo");
+        Attrs.Key<String> key = Attrs.newKey("foo");
         key.put(attrs, "bar");
         key.put(attrs, "baz");
 
-        assertEquals("baz", key.get(attrs));
-        Truth.assertThat(attrs.keySet()).containsExactly(key);
+        assertThat(key.get(attrs)).isEqualTo("baz");
+        assertThat(attrs.keySet()).containsExactly(key);
     }
 
     @Test
     void getReturnsNull() {
         Attrs attrs = Attrs.newInstance();
-        Key<String> key = Attrs.newKey("foo");
+        Attrs.Key<String> key = Attrs.newKey("foo");
 
-        assertNull(key.get(attrs));
+        assertThat(key.get(attrs)).isNull();
     }
 
     @Test
     void getOrDefault_picksDefault() {
         Attrs attrs = Attrs.newInstance();
-        Key<String> key = Attrs.newKey("foo");
+        Attrs.Key<String> key = Attrs.newKey("foo");
 
-        assertEquals("bar", key.getOrDefault(attrs, "bar"));
+        assertThat(key.getOrDefault(attrs, "bar")).isEqualTo("bar");
     }
 
     @Test
     void getOrDefault_failsOnNullDefault() {
         Attrs attrs = Attrs.newInstance();
-        Key<String> key = Attrs.newKey("foo");
+        Attrs.Key<String> key = Attrs.newKey("foo");
         key.put(attrs, "bar");
 
-        assertThrows(NullPointerException.class, () -> key.getOrDefault(attrs, null));
+        assertThatThrownBy(() -> key.getOrDefault(attrs, null)).isInstanceOf(NullPointerException.class);
     }
 }

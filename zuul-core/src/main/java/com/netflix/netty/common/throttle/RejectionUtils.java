@@ -16,7 +16,6 @@
 
 package com.netflix.netty.common.throttle;
 
-import com.netflix.netty.common.ConnectionCloseChannelAttributes;
 import com.netflix.netty.common.proxyprotocol.HAProxyMessageChannelHandler;
 import com.netflix.zuul.passport.CurrentPassport;
 import com.netflix.zuul.passport.PassportState;
@@ -135,20 +134,6 @@ public final class RejectionUtils {
     }
 
     /**
-     * Marks the given channel for being closed after the next response.
-     *
-     * @param ctx the channel handler processing the request
-     */
-    public static void allowThenClose(ChannelHandlerContext ctx) {
-        // Just flag this channel to be closed after response complete.
-        ctx.channel()
-                .attr(ConnectionCloseChannelAttributes.CLOSE_AFTER_RESPONSE)
-                .set(ctx.newPromise());
-
-        // And allow this request through without rejecting.
-    }
-
-    /**
      * Throttle either by sending rejection response message, or by closing the connection now, or just drop the
      * message. Only call this if ThrottleResult.shouldThrottle() returned {@code true}.
      *
@@ -172,8 +157,7 @@ public final class RejectionUtils {
             @Nullable Integer injectedLatencyMillis,
             HttpResponseStatus rejectedCode,
             String rejectedBody,
-            Map<String, String> rejectionHeaders)
-            throws Exception {
+            Map<String, String> rejectionHeaders) {
 
         boolean shouldDropMessage = false;
         if (rejectionType == RejectionType.REJECT || rejectionType == RejectionType.CLOSE) {
@@ -185,13 +169,11 @@ public final class RejectionUtils {
             shouldRejectNow = true;
         } else if (rejectionType == RejectionType.CLOSE && msg instanceof HttpRequest) {
             shouldRejectNow = true;
-        } else if (rejectionType == RejectionType.ALLOW_THEN_CLOSE && msg instanceof HttpRequest) {
-            shouldRejectNow = true;
         }
 
         if (shouldRejectNow) {
             // Send a rejection response.
-            HttpRequest request = msg instanceof HttpRequest ? (HttpRequest) msg : null;
+            HttpRequest request = msg instanceof HttpRequest httpRequest ? httpRequest : null;
             reject(
                     ctx,
                     rejectionType,
@@ -270,7 +252,7 @@ public final class RejectionUtils {
             String rejectedBody,
             Map<String, String> rejectionHeaders) {
         switch (rejectionType) {
-            case REJECT:
+            case REJECT -> {
                 sendRejectionResponse(
                         ctx,
                         nfStatus,
@@ -281,12 +263,11 @@ public final class RejectionUtils {
                         rejectedBody,
                         rejectionHeaders);
                 return;
-            case CLOSE:
+            }
+            case CLOSE -> {
                 rejectByClosingConnection(ctx, nfStatus, reason, request, injectedLatencyMillis);
                 return;
-            case ALLOW_THEN_CLOSE:
-                allowThenClose(ctx);
-                return;
+            }
         }
         throw new AssertionError("Bad rejection type: " + rejectionType);
     }
@@ -304,9 +285,9 @@ public final class RejectionUtils {
 
     private static boolean closeConnectionAfterReject(Channel channel) {
         if (channel.hasAttr(HAProxyMessageChannelHandler.ATTR_HAPROXY_VERSION)) {
-            return HAProxyProtocolVersion.V2
-                    == channel.attr(HAProxyMessageChannelHandler.ATTR_HAPROXY_VERSION)
-                    .get();
+            return channel.attr(HAProxyMessageChannelHandler.ATTR_HAPROXY_VERSION)
+                            .get()
+                    == HAProxyProtocolVersion.V2;
         } else {
             return false;
         }
@@ -330,6 +311,5 @@ public final class RejectionUtils {
         return new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, status, body, headers, EmptyHttpHeaders.INSTANCE);
     }
 
-    private RejectionUtils() {
-    }
+    private RejectionUtils() {}
 }

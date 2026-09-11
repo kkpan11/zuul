@@ -1,22 +1,28 @@
-apply plugin: 'groovy'
 apply plugin: "java"
 apply plugin: 'application'
 
-dependencies {
-    implementation project(":zuul-core"),
-            project(":zuul-groovy"),
-            project(":zuul-guice")
-    implementation "com.netflix.eureka:eureka-client:1.10.18"
-    implementation 'commons-configuration:commons-configuration:1.10'
-    annotationProcessor project(":zuul-processor")
-
-    runtimeOnly 'org.apache.logging.log4j:log4j-core:2.23.1'
-    runtimeOnly 'org.apache.logging.log4j:log4j-slf4j-impl:2.19.0'
-
+application {
+    mainClass = "com.netflix.zuul.sample.Bootstrap"
+    applicationDefaultJvmArgs = ["-DTZ=GMT",
+                                 "-Darchaius.deployment.environment=test",
+                                 "-Dcom.sun.management.jmxremote",
+                                 "-Dcom.sun.management.jmxremote.local.only=false",
+                                 "-Deureka.validateInstanceId=false",
+                                 "-Deureka.mt.num_retries=1",
+                                 "-Dlog4j.configurationFile=log4j2.xml"]
 }
 
-jar {
-    from sourceSets.main.allGroovy
+dependencies {
+    implementation project(":zuul-core")
+    implementation "com.netflix.eureka:eureka-client:2.0.6"
+    implementation 'commons-configuration:commons-configuration:1.10'
+    implementation "jakarta.inject:jakarta.inject-api:2.0.1"
+    annotationProcessor project(":zuul-processor")
+
+    implementation 'org.apache.logging.log4j:log4j-core:2.26.1'
+    implementation 'org.apache.logging.log4j:log4j-api:2.26.1'
+    implementation 'org.apache.logging.log4j:log4j-slf4j-impl:2.26.1'
+    implementation 'org.slf4j:slf4j-simple:2.0.17'
 }
 
 /*
@@ -24,15 +30,6 @@ jar {
  * Run benchmark: ./gradlew run -Pbench
  */
 run {
-    mainClassName = "com.netflix.zuul.sample.Bootstrap"
-
-    applicationDefaultJvmArgs = ["-DTZ=GMT",
-                                 "-Darchaius.deployment.environment=test",
-                                 "-Dcom.sun.management.jmxremote",
-                                 "-Dcom.sun.management.jmxremote.local.only=false",
-                                 "-Deureka.validateInstanceId=false",
-                                 "-Deureka.mt.num_retries=1"]
-
     if (project.hasProperty('bench')) {
         println 'Running benchmark configuration...'
         jvmArgs "-Darchaius.deployment.environment=benchmark"

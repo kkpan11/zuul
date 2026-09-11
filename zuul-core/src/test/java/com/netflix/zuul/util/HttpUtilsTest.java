@@ -16,11 +16,8 @@
 
 package com.netflix.zuul.util;
 
-import static com.google.common.truth.Truth.assertThat;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.netflix.zuul.context.SessionContext;
 import com.netflix.zuul.message.Headers;
@@ -31,7 +28,11 @@ import com.netflix.zuul.message.http.HttpRequestMessage;
 import com.netflix.zuul.message.http.HttpRequestMessageImpl;
 import com.netflix.zuul.message.http.HttpResponseMessage;
 import com.netflix.zuul.message.http.HttpResponseMessageImpl;
+import java.net.URISyntaxException;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Unit tests for {@link HttpUtils}.
@@ -40,56 +41,56 @@ class HttpUtilsTest {
 
     @Test
     void detectsGzip() {
-        assertTrue(HttpUtils.isCompressed("gzip"));
+        assertThat(HttpUtils.isCompressed("gzip")).isTrue();
     }
 
     @Test
     void detectsDeflate() {
-        assertTrue(HttpUtils.isCompressed("deflate"));
+        assertThat(HttpUtils.isCompressed("deflate")).isTrue();
     }
 
     @Test
     void detectsCompress() {
-        assertTrue(HttpUtils.isCompressed("compress"));
+        assertThat(HttpUtils.isCompressed("compress")).isTrue();
     }
 
     @Test
     void detectsBR() {
-        assertTrue(HttpUtils.isCompressed("br"));
+        assertThat(HttpUtils.isCompressed("br")).isTrue();
     }
 
     @Test
     void detectsNonGzip() {
-        assertFalse(HttpUtils.isCompressed("identity"));
+        assertThat(HttpUtils.isCompressed("identity")).isFalse();
     }
 
     @Test
     void detectsGzipAmongOtherEncodings() {
-        assertTrue(HttpUtils.isCompressed("gzip, deflate"));
+        assertThat(HttpUtils.isCompressed("gzip, deflate")).isTrue();
     }
 
     @Test
     void acceptsGzip() {
         Headers headers = new Headers();
         headers.add("Accept-Encoding", "gzip, deflate");
-        assertTrue(HttpUtils.acceptsGzip(headers));
+        assertThat(HttpUtils.acceptsGzip(headers)).isTrue();
     }
 
     @Test
     void acceptsGzip_only() {
         Headers headers = new Headers();
         headers.add("Accept-Encoding", "deflate");
-        assertFalse(HttpUtils.acceptsGzip(headers));
+        assertThat(HttpUtils.acceptsGzip(headers)).isFalse();
     }
 
     @Test
     void stripMaliciousHeaderChars() {
-        assertEquals("something", HttpUtils.stripMaliciousHeaderChars("some\r\nthing"));
-        assertEquals("some thing", HttpUtils.stripMaliciousHeaderChars("some thing"));
-        assertEquals("something", HttpUtils.stripMaliciousHeaderChars("\nsome\r\nthing\r"));
-        assertEquals("", HttpUtils.stripMaliciousHeaderChars("\r"));
-        assertEquals("", HttpUtils.stripMaliciousHeaderChars(""));
-        assertNull(HttpUtils.stripMaliciousHeaderChars(null));
+        assertThat(HttpUtils.stripMaliciousHeaderChars("some\r\nthing")).isEqualTo("something");
+        assertThat(HttpUtils.stripMaliciousHeaderChars("some thing")).isEqualTo("some thing");
+        assertThat(HttpUtils.stripMaliciousHeaderChars("\nsome\r\nthing\r")).isEqualTo("something");
+        assertThat(HttpUtils.stripMaliciousHeaderChars("\r")).isEqualTo("");
+        assertThat(HttpUtils.stripMaliciousHeaderChars("")).isEqualTo("");
+        assertThat(HttpUtils.stripMaliciousHeaderChars(null)).isNull();
     }
 
     @Test
@@ -120,5 +121,159 @@ class HttpUtilsTest {
         Headers headers = new Headers();
         ZuulMessage msg = new ZuulMessageImpl(context, headers);
         assertThat(HttpUtils.getBodySizeIfKnown(msg)).isNull();
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "/path?a=b, /path",
+        "/path?, /path",
+        "/path#frag, /path",
+        "/path?a=b#frag, /path",
+        // traversal hidden in the query is discarded, not normalized into the path
+        "/path?a=../../etc, /path",
+        // path is still normalized after the query is stripped
+        "/../etc?x=1, /etc",
+    })
+    void parsePath_stripsQueryAndFragment(String uri, String expected) {
+        assertThat(parsePath(uri)).isEqualTo(expected);
+    }
+
+    // The query is stripped by hand precisely because java.net.URI rejects characters that are legal
+    // in real query strings; a valid path with a "dirty" query must resolve, not 400. Guards the
+    // manual strip - without it, parsing the full URI-with-query would throw on these.
+    @ParameterizedTest
+    @CsvSource({
+        "/search?q=a|b|c, /search",
+        "/p?x=a b, /p",
+        "/p?v=^1.0, /p",
+        "/p?j={a:1}, /p",
+    })
+    void parsePath_stripsQueryWithUriIllegalChars(String uri, String expected) {
+        assertThat(parsePath(uri)).isEqualTo(expected);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "/api/v1/resource, /api/v1/resource",
+        "/, /",
+        "/a/b/c/, /a/b/c/",
+    })
+    void parsePath_returnsCleanPathUnchanged(String uri, String expected) {
+        assertThat(parsePath(uri)).isEqualTo(expected);
+    }
+
+    // Opaque targets have no path to route on at all. The caller turns the URISyntaxException into
+    // a 400 (see ClientRequestReceiver).
+    @ParameterizedTest
+    @ValueSource(strings = {"mailto:foo@bar.com", "tel:12345", "javascript:alert(1)", "urn:isbn:123"})
+    void parsePath_rejectsOpaqueUris(String uri) {
+        assertThatThrownBy(() -> HttpUtils.parsePath(uri))
+                .isInstanceOf(URISyntaxException.class)
+                .hasMessageContaining("opaque URI");
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "http://host/../../etc/passwd, /etc/passwd",
+        "http://host/a/../b, /b",
+        "https://www.netflix.com/foo/bar?x=1, /foo/bar",
+    })
+    void parsePath_extractsPathFromAbsoluteFormTargets(String uri, String expected) {
+        assertThat(parsePath(uri)).isEqualTo(expected);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "/a/b/../c, /a/c",
+        "/a/./b, /a/b",
+        "/a/b/.., /a/",
+        "/a/b/../, /a/",
+        "/a/./../b, /b",
+        "/./../a, /a",
+        "/a//b, /a/b",
+    })
+    void parsePath_collapsesPlainDotSegments(String uri, String expected) {
+        assertThat(parsePath(uri)).isEqualTo(expected);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "/a/%2e%2e/b, /b",
+        "/a/%2E%2E/b, /b",
+        "/a/%2e/b, /a/b",
+        "/a/.%2e/b, /b",
+        "/.%2e/.%2e/etc, /etc",
+        "/%2e%2e/%2e%2e/etc, /etc",
+    })
+    void parsePath_decodesThenCollapsesPercentEncodedDots(String uri, String expected) {
+        assertThat(parsePath(uri)).isEqualTo(expected);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "/../, /",
+        "/../etc, /etc",
+        "/../../etc, /etc",
+        "/../../../../etc/passwd, /etc/passwd",
+        "/a/../../etc, /etc",
+        "/%2e%2e/etc, /etc",
+        // authority-form: the fake host is dropped and the escape neutralized
+        "//etc/passwd, /passwd",
+        "//host/../../x, /x",
+    })
+    void parsePath_clampsLeadingEscapesToRoot(String uri, String expected) {
+        assertThat(parsePath(uri)).isEqualTo(expected);
+    }
+
+    // %2f stays encoded, so a ".." wrapped in encoded slashes is a single opaque segment that
+    // normalize cannot see through. This is the defense boundary: downstream code that later
+    // decodes %2f must not treat the result as an already-normalized path.
+    @ParameterizedTest
+    @CsvSource({
+        "/a%2f..%2f..%2fb, /a%2f..%2f..%2fb",
+        "/..%2f..%2fetc, /..%2f..%2fetc",
+        "/%2e%2e%2f%2e%2e%2fetc, /..%2f..%2fetc",
+        "/a/%2e%2e%2f%2e%2e/etc, /a/..%2f../etc",
+        // uppercase %2F is left encoded too - only %2e/%2E are decoded
+        "/a%2F..%2F..%2Fb, /a%2F..%2F..%2Fb",
+    })
+    void parsePath_doesNotDecodeEncodedSlashes(String uri, String expected) {
+        assertThat(parsePath(uri)).isEqualTo(expected);
+    }
+
+    // None of these are a "." or ".." path segment, so there is nothing for normalize to collapse -
+    // they pass through verbatim rather than being mistaken for traversal.
+    @ParameterizedTest
+    @CsvSource({
+        "/%252e%252e/etc, /%252e%252e/etc",
+        "/..%00, /..%00",
+        "/a/..;/b, /a/..;/b",
+        "/..., /...",
+        "/...., /....",
+        "/foo/....//bar, /foo/..../bar",
+        // interior traversal still collapses even with an adjacent encoded null byte
+        "/a%00/../b, /b",
+    })
+    void parsePath_leavesNonDotDotSequencesUntouched(String uri, String expected) {
+        assertThat(parsePath(uri)).isEqualTo(expected);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"//", "/\\..\\..\\etc"})
+    void parsePath_rejectsMalformedUris(String uri) {
+        assertThatThrownBy(() -> HttpUtils.parsePath(uri)).isInstanceOf(URISyntaxException.class);
+    }
+
+    @Test
+    void parsePath_throwsNpeOnNull() {
+        assertThatThrownBy(() -> HttpUtils.parsePath(null)).isInstanceOf(NullPointerException.class);
+    }
+
+    private static String parsePath(String uri) {
+        try {
+            return HttpUtils.parsePath(uri);
+        } catch (URISyntaxException e) {
+            throw new AssertionError("did not expect parsePath to reject [" + uri + "]", e);
+        }
     }
 }

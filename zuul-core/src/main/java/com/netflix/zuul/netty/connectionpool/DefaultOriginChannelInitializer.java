@@ -49,7 +49,8 @@ public class DefaultOriginChannelInitializer extends OriginChannelInitializer {
     public DefaultOriginChannelInitializer(ConnectionPoolConfig connPoolConfig, Registry spectatorRegistry) {
         this.connectionPoolConfig = connPoolConfig;
         String niwsClientName = connectionPoolConfig.getOriginName().getNiwsClientName();
-        this.connectionPoolHandler = new ConnectionPoolHandler(connectionPoolConfig.getOriginName());
+        this.connectionPoolHandler = new ConnectionPoolHandler(
+                ConnectionPoolMetrics.create(connPoolConfig.getOriginName(), spectatorRegistry));
         this.httpMetricsHandler = new HttpMetricsChannelHandler(spectatorRegistry, "client", niwsClientName);
         this.nettyLogger = new LoggingHandler("zuul.origin.nettylog." + niwsClientName, LogLevel.INFO);
         this.sslContext = getClientSslContext(spectatorRegistry);
@@ -57,7 +58,7 @@ public class DefaultOriginChannelInitializer extends OriginChannelInitializer {
 
     @Override
     protected void initChannel(Channel ch) throws Exception {
-        final ChannelPipeline pipeline = ch.pipeline();
+        ChannelPipeline pipeline = ch.pipeline();
 
         pipeline.addLast(new PassportStateOriginHandler.InboundHandler());
         pipeline.addLast(new PassportStateOriginHandler.OutboundHandler());

@@ -23,6 +23,8 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpResponse;
+import io.netty.handler.codec.http.HttpResponseStatus;
+import io.netty.handler.codec.http.HttpStatusClass;
 import io.netty.util.Attribute;
 import io.netty.util.AttributeKey;
 import org.slf4j.Logger;
@@ -59,9 +61,10 @@ public abstract class HttpLifecycleChannelHandler {
             // This could potentially happen if a bad client sends a 2nd request on the same connection
             // without waiting for the response from the first. And we don't support HTTP Pipelining.
             logger.debug(
-                    "Received a http request on connection where we already have a request being processed. Closing the connection now. channel = {}",
+                    "Received a http request on connection where we already have a request being processed. Closing"
+                            + " the connection now. channel = {}",
                     channel.id().asLongText());
-            channel.attr(ATTR_HTTP_PIPELINE_REJECT).set(Boolean.TRUE);
+            channel.attr(ATTR_HTTP_PIPELINE_REJECT).set(true);
             channel.close();
             return false;
         }
@@ -95,6 +98,20 @@ public abstract class HttpLifecycleChannelHandler {
         ctx.pipeline().fireUserEventTriggered(new CompleteEvent(reason, request, response));
 
         return true;
+    }
+
+    /**
+     * Returns whether the response is a 1xx interim response that will be followed by a further response on the same
+     * connection (e.g. 100 Continue, 102 Processing, 103 Early Hints), and so does not complete the HTTP session.
+     *
+     * <p>101 Switching Protocols is deliberately excluded: although numerically a 1xx, it is a terminal response that
+     * hands the connection off to another protocol (e.g. WebSocket). The HTTP session is complete at that point, so it
+     * must not be treated as interim.
+     */
+    public static boolean isInterimResponse(HttpResponse response) {
+        return response != null
+                && response.status().codeClass() == HttpStatusClass.INFORMATIONAL
+                && !response.status().equals(HttpResponseStatus.SWITCHING_PROTOCOLS);
     }
 
     protected static void addPassportState(ChannelHandlerContext ctx, PassportState state) {

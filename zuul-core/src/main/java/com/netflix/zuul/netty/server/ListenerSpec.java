@@ -16,23 +16,20 @@
 
 package com.netflix.zuul.netty.server;
 
-/**
+/*
  * @author Argha C
  * @since 10/2/24
  */
-
 import java.net.SocketAddress;
 import java.util.Objects;
 
 /**
  * A specification of an address to listen on.
  */
-
 public record ListenerSpec(String addressName, boolean defaultAddressEnabled, SocketAddress defaultAddressValue) {
 
     public ListenerSpec {
         Objects.requireNonNull(addressName, "addressName");
-        Objects.requireNonNull(defaultAddressEnabled, "defaultAddressEnabled");
         Objects.requireNonNull(defaultAddressValue, "defaultAddressValue");
     }
 

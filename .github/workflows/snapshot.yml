@@ -4,23 +4,25 @@ on:
   push:
     branches:
       - master
+      - zuul-v4
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    environment: Publish
     steps:
       - name: Setup Git
         run: |
           git config --global user.name 'Zuul Build'
           git config --global user.email 'zuul-build@netflix.com'
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Set up JDK
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: 'temurin'
-          java-version: 17
+          java-version: 21
           cache: 'gradle'
       - name: Build snapshot
         run: ./gradlew build snapshot

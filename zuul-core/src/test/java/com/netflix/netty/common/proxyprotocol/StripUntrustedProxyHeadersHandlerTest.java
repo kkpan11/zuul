@@ -16,7 +16,7 @@
 
 package com.netflix.netty.common.proxyprotocol;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -154,7 +154,21 @@ class StripUntrustedProxyHeadersHandlerTest {
         headers.add("x-forwarded-for", "abcd");
         stripHandler.stripXFFHeaders(msg);
 
-        assertFalse(headers.contains("x-forwarded-for"));
+        assertThat(headers.contains("x-forwarded-for")).isFalse();
+    }
+
+    @Test
+    void strip_hostRewritingHeaders() {
+        StripUntrustedProxyHeadersHandler stripHandler = getHandler(AllowWhen.MUTUAL_SSL_AUTH);
+
+        headers.add("x-forwarded-host", "evil.attacker.com");
+        headers.add("x-forwarded-prefix", "/evil");
+        headers.add("forwarded", "host=evil.attacker.com");
+        stripHandler.stripXFFHeaders(msg);
+
+        assertThat(headers.contains("x-forwarded-host")).isFalse();
+        assertThat(headers.contains("x-forwarded-prefix")).isFalse();
+        assertThat(headers.contains("forwarded")).isFalse();
     }
 
     private StripUntrustedProxyHeadersHandler getHandler(AllowWhen allowWhen) {

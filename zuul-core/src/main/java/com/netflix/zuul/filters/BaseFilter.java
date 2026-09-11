@@ -21,7 +21,6 @@ import com.netflix.spectator.api.Counter;
 import com.netflix.zuul.exception.ZuulFilterConcurrencyExceededException;
 import com.netflix.zuul.message.ZuulMessage;
 import com.netflix.zuul.netty.SpectatorUtils;
-import io.netty.handler.codec.http.HttpContent;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -43,6 +42,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public abstract class BaseFilter<I extends ZuulMessage, O extends ZuulMessage> implements ZuulFilter<I, O> {
 
     private final String baseName;
+    private final boolean processesContentChunks;
     private final AtomicInteger concurrentCount;
     private final Counter concurrencyRejections;
     private final CachedDynamicBooleanProperty filterDisabled;
@@ -53,20 +53,26 @@ public abstract class BaseFilter<I extends ZuulMessage, O extends ZuulMessage> i
 
     protected BaseFilter() {
         baseName = getClass().getSimpleName() + "." + filterType();
+        processesContentChunks = ZuulFilter.overridesProcessContentChunk(getClass());
         concurrentCount = SpectatorUtils.newGauge("zuul.filter.concurrency.current", baseName, new AtomicInteger(0));
         concurrencyRejections = SpectatorUtils.newCounter("zuul.filter.concurrency.rejected", baseName);
         filterDisabled = new CachedDynamicBooleanProperty(disablePropertyName(), false);
-        concurrencyProtectionEnabled = new CachedDynamicBooleanProperty("zuul.filter.concurrency.protect.enabled",
-                true);
-        filterConcurrencyDefault = new CachedDynamicIntProperty("zuul.filter.concurrency.limit.default",
-                DEFAULT_FILTER_CONCURRENCY_LIMIT);
-        filterConcurrencyCustom = new CachedDynamicIntProperty(maxConcurrencyPropertyName(),
-                DEFAULT_FILTER_CONCURRENCY_LIMIT);
+        concurrencyProtectionEnabled =
+                new CachedDynamicBooleanProperty("zuul.filter.concurrency.protect.enabled", true);
+        filterConcurrencyDefault =
+                new CachedDynamicIntProperty("zuul.filter.concurrency.limit.default", DEFAULT_FILTER_CONCURRENCY_LIMIT);
+        filterConcurrencyCustom =
+                new CachedDynamicIntProperty(maxConcurrencyPropertyName(), DEFAULT_FILTER_CONCURRENCY_LIMIT);
     }
 
     @Override
     public String filterName() {
         return getClass().getName();
+    }
+
+    @Override
+    public boolean processesContentChunks() {
+        return processesContentChunks;
     }
 
     @Override
@@ -118,14 +124,9 @@ public abstract class BaseFilter<I extends ZuulMessage, O extends ZuulMessage> i
     }
 
     @Override
-    public HttpContent processContentChunk(ZuulMessage zuulMessage, HttpContent chunk) {
-        return chunk;
-    }
-
-    @Override
     public void incrementConcurrency() throws ZuulFilterConcurrencyExceededException {
-        final int limit = calculateConcurency();
-        if ((concurrencyProtectionEnabled.get()) && (concurrentCount.get() >= limit)) {
+        int limit = calculateConcurency();
+        if (concurrencyProtectionEnabled.get() && (concurrentCount.get() >= limit)) {
             concurrencyRejections.increment();
             throw new ZuulFilterConcurrencyExceededException(this, limit);
         }
@@ -133,12 +134,16 @@ public abstract class BaseFilter<I extends ZuulMessage, O extends ZuulMessage> i
     }
 
     protected int calculateConcurency() {
-        final int customLimit = filterConcurrencyCustom.get();
+        int customLimit = filterConcurrencyCustom.get();
         return customLimit != DEFAULT_FILTER_CONCURRENCY_LIMIT ? customLimit : filterConcurrencyDefault.get();
     }
 
     @Override
     public void decrementConcurrency() {
         concurrentCount.decrementAndGet();
+    }
+
+    public int getConcurrency() {
+        return concurrentCount.get();
     }
 }

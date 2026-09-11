@@ -16,7 +16,6 @@
 
 package com.netflix.zuul.context;
 
-import com.google.common.collect.ImmutableList;
 import com.netflix.client.config.IClientConfig;
 import com.netflix.zuul.filters.ZuulFilter;
 import com.netflix.zuul.message.http.HttpRequestMessage;
@@ -25,9 +24,9 @@ import com.netflix.zuul.niws.RequestAttempts;
 import com.netflix.zuul.passport.CurrentPassport;
 import com.netflix.zuul.stats.status.StatusCategory;
 import io.netty.channel.Channel;
+import jakarta.inject.Provider;
 import java.net.InetAddress;
 import java.util.Map;
-import javax.inject.Provider;
 
 /**
  * Common Context Keys
@@ -44,9 +43,12 @@ public class CommonContextKeys {
             SessionContext.newKey("origin_status_category");
     public static final SessionContext.Key<String> ORIGIN_STATUS_CATEGORY_REASON =
             SessionContext.newKey("origin_status_category_reason");
+    public static final SessionContext.Key<String> BAD_URI_REASON = SessionContext.newKey("bad_uri_reason");
     public static final SessionContext.Key<Integer> ORIGIN_STATUS = SessionContext.newKey("origin_status");
     public static final SessionContext.Key<RequestAttempts> REQUEST_ATTEMPTS =
             SessionContext.newKey("request_attempts");
+
+    public static final SessionContext.Key<String> BROWNOUT_REASON = SessionContext.newKey("brownout_reason");
 
     public static final SessionContext.Key<IClientConfig> REST_CLIENT_CONFIG =
             SessionContext.newKey("rest_client_config");
@@ -57,8 +59,6 @@ public class CommonContextKeys {
             SessionContext.newKey("_zuul_origin_chosen_host_addr_map");
     public static final SessionContext.Key<Channel> ORIGIN_CHANNEL = SessionContext.newKey("_origin_channel");
     public static final String ORIGIN_MANAGER = "origin_manager";
-    public static final SessionContext.Key<ImmutableList.Builder<String>> ROUTING_LOG =
-            SessionContext.newKey("routing_log");
     public static final String USE_FULL_VIP_NAME = "use_full_vip_name";
     public static final String ACTUAL_VIP = "origin_vip_actual";
     public static final String ORIGIN_VIP_SECURE = "origin_vip_secure";
@@ -86,6 +86,4 @@ public class CommonContextKeys {
             SessionContext.newKey("response_body_size");
 
     public static final SessionContext.Key<CurrentPassport> PASSPORT = SessionContext.newKey("_passport");
-    public static final SessionContext.Key<Boolean> ZUUL_USE_DECODED_URI =
-            SessionContext.newKey("zuul_use_decoded_uri");
 }

@@ -4,8 +4,8 @@ dependencies {
     implementation libraries.guava
     implementation project(":zuul-core")
 
-    testImplementation libraries.jupiterApi, libraries.jupiterParams, libraries.jupiterEngine,
-            libraries.truth
+    testImplementation libraries.jupiterApi, libraries.jupiterParams, libraries.jupiterEngine, libraries.junitPlatformLauncher,
+            libraries.assertj
     testAnnotationProcessor project(":zuul-processor")
 }
 

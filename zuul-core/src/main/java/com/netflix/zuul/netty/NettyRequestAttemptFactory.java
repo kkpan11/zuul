@@ -24,6 +24,7 @@ import com.netflix.zuul.netty.connectionpool.OriginConnectException;
 import com.netflix.zuul.niws.RequestAttempts;
 import com.netflix.zuul.origins.OriginConcurrencyExceededException;
 import io.netty.channel.unix.Errors;
+import io.netty.handler.codec.http2.Http2Exception.HeaderListSizeException;
 import io.netty.handler.timeout.ReadTimeoutException;
 import java.nio.channels.ClosedChannelException;
 import org.slf4j.Logger;
@@ -33,7 +34,7 @@ public class NettyRequestAttemptFactory {
 
     private static final Logger LOG = LoggerFactory.getLogger(NettyRequestAttemptFactory.class);
 
-    public ErrorType mapNettyToOutboundErrorType(final Throwable t) {
+    public ErrorType mapNettyToOutboundErrorType(Throwable t) {
         if (t instanceof ReadTimeoutException) {
             return OutboundErrorType.READ_TIMEOUT;
         }
@@ -42,16 +43,16 @@ public class NettyRequestAttemptFactory {
             return OutboundErrorType.ORIGIN_CONCURRENCY_EXCEEDED;
         }
 
-        if (t instanceof OriginConnectException) {
-            return ((OriginConnectException) t).getErrorType();
+        if (t instanceof OriginConnectException originConnectException) {
+            return originConnectException.getErrorType();
         }
 
-        if (t instanceof OutboundException) {
-            return ((OutboundException) t).getOutboundErrorType();
+        if (t instanceof OutboundException outboundException) {
+            return outboundException.getOutboundErrorType();
         }
 
-        if (t instanceof Errors.NativeIoException
-                && Errors.ERRNO_ECONNRESET_NEGATIVE == ((Errors.NativeIoException) t).expectedErr()) {
+        if (t instanceof Errors.NativeIoException nativeIoException
+                && nativeIoException.expectedErr() == Errors.ERRNO_ECONNRESET_NEGATIVE) {
             // This is a "Connection reset by peer" which we see fairly often happening when Origin servers are
             // overloaded.
             LOG.warn("ERRNO_ECONNRESET_NEGATIVE mapped to RESET_CONNECTION", t);
@@ -62,7 +63,11 @@ public class NettyRequestAttemptFactory {
             return OutboundErrorType.RESET_CONNECTION;
         }
 
-        final Throwable cause = t.getCause();
+        if (t instanceof HeaderListSizeException) {
+            return OutboundErrorType.HEADER_FIELDS_TOO_LARGE;
+        }
+
+        Throwable cause = t.getCause();
         if (cause instanceof IllegalStateException && cause.getMessage().contains("server")) {
             LOG.warn("IllegalStateException mapped to NO_AVAILABLE_SERVERS", cause);
             return OutboundErrorType.NO_AVAILABLE_SERVERS;
@@ -71,14 +76,14 @@ public class NettyRequestAttemptFactory {
         return OutboundErrorType.OTHER;
     }
 
-    public OutboundException mapNettyToOutboundException(final Throwable t, final SessionContext context) {
-        if (t instanceof OutboundException) {
-            return (OutboundException) t;
+    public OutboundException mapNettyToOutboundException(Throwable t, SessionContext context) {
+        if (t instanceof OutboundException outboundException) {
+            return outboundException;
         }
 
         // Map this throwable to zuul's OutboundException.
-        final ErrorType errorType = mapNettyToOutboundErrorType(t);
-        final RequestAttempts attempts = RequestAttempts.getFromSessionContext(context);
+        ErrorType errorType = mapNettyToOutboundErrorType(t);
+        RequestAttempts attempts = RequestAttempts.getFromSessionContext(context);
         if (errorType == OutboundErrorType.OTHER) {
             return new OutboundException(errorType, attempts, t);
         }

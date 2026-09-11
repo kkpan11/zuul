@@ -32,6 +32,7 @@ import com.netflix.netty.common.ssl.ServerSslConfig;
 import com.netflix.netty.common.status.ServerStatusManager;
 import com.netflix.spectator.api.Counter;
 import com.netflix.spectator.api.Registry;
+import com.netflix.spectator.api.histogram.PercentileTimer;
 import com.netflix.zuul.FilterLoader;
 import com.netflix.zuul.FilterUsageNotifier;
 import com.netflix.zuul.RequestCompleteHandler;
@@ -43,11 +44,11 @@ import io.netty.channel.group.DefaultChannelGroup;
 import io.netty.handler.ssl.SslContext;
 import io.netty.util.AsyncMapping;
 import io.netty.util.concurrent.GlobalEventExecutor;
+import jakarta.inject.Inject;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.Map;
 import javax.annotation.Nullable;
-import javax.inject.Inject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -148,15 +149,15 @@ public abstract class BaseServerStartup {
         return channelDependencies;
     }
 
-    protected ChannelConfig defaultChannelDependencies(ListenerSpec listenSpec) {
+    protected ChannelConfig defaultChannelDependencies(ListenerSpec listenerSpec) {
         ChannelConfig channelDependencies = new ChannelConfig();
-        addChannelDependencies(channelDependencies, listenSpec.addressName());
+        addChannelDependencies(channelDependencies, listenerSpec);
         return channelDependencies;
     }
 
     protected void addChannelDependencies(
             ChannelConfig channelDeps,
-            @SuppressWarnings("unused") String listenAddressName) { // listenAddressName is used by subclasses
+            @SuppressWarnings("unused") String listenAddressName) { // listenAddressName may be overridden by subclasse
         channelDeps.set(ZuulDependencyKeys.registry, registry);
 
         channelDeps.set(ZuulDependencyKeys.applicationInfoManager, applicationInfoManager);
@@ -166,7 +167,40 @@ public abstract class BaseServerStartup {
 
         channelDeps.set(ZuulDependencyKeys.sessionCtxDecorator, sessionCtxDecorator);
         channelDeps.set(ZuulDependencyKeys.requestCompleteHandler, reqCompleteHandler);
-        final Counter httpRequestReadTimeoutCounter = registry.counter("server.http.request.read.timeout");
+        Counter httpRequestHeadersReadTimeoutCounter = registry.counter("server.http.request.headers.read.timeout");
+        channelDeps.set(ZuulDependencyKeys.httpRequestHeadersReadTimeoutCounter, httpRequestHeadersReadTimeoutCounter);
+        PercentileTimer httpRequestHeadersReadTimer =
+                PercentileTimer.get(registry, registry.createId("server.http.request.headers.read.timer"));
+        channelDeps.set(ZuulDependencyKeys.httpRequestHeadersReadTimer, httpRequestHeadersReadTimer);
+        Counter httpRequestReadTimeoutCounter = registry.counter("server.http.request.read.timeout");
+        channelDeps.set(ZuulDependencyKeys.httpRequestReadTimeoutCounter, httpRequestReadTimeoutCounter);
+        channelDeps.set(ZuulDependencyKeys.filterLoader, filterLoader);
+        channelDeps.set(ZuulDependencyKeys.filterUsageNotifier, usageNotifier);
+
+        channelDeps.set(ZuulDependencyKeys.eventLoopGroupMetrics, eventLoopGroupMetrics);
+
+        channelDeps.set(ZuulDependencyKeys.sslClientCertCheckChannelHandlerProvider, new NullChannelHandlerProvider());
+        channelDeps.set(ZuulDependencyKeys.rateLimitingChannelHandlerProvider, new NullChannelHandlerProvider());
+    }
+
+    protected void addChannelDependencies(
+            ChannelConfig channelDeps,
+            @SuppressWarnings("unused") ListenerSpec listenerSpec) { // listenerSpec may be overridden by subclasses
+        channelDeps.set(ZuulDependencyKeys.registry, registry);
+
+        channelDeps.set(ZuulDependencyKeys.applicationInfoManager, applicationInfoManager);
+        channelDeps.set(ZuulDependencyKeys.serverStatusManager, serverStatusManager);
+
+        channelDeps.set(ZuulDependencyKeys.accessLogPublisher, accessLogPublisher);
+
+        channelDeps.set(ZuulDependencyKeys.sessionCtxDecorator, sessionCtxDecorator);
+        channelDeps.set(ZuulDependencyKeys.requestCompleteHandler, reqCompleteHandler);
+        Counter httpRequestHeadersReadTimeoutCounter = registry.counter("server.http.request.headers.read.timeout");
+        channelDeps.set(ZuulDependencyKeys.httpRequestHeadersReadTimeoutCounter, httpRequestHeadersReadTimeoutCounter);
+        PercentileTimer httpRequestHeadersReadTimer =
+                PercentileTimer.get(registry, registry.createId("server.http.request.headers.read.timer"));
+        channelDeps.set(ZuulDependencyKeys.httpRequestHeadersReadTimer, httpRequestHeadersReadTimer);
+        Counter httpRequestReadTimeoutCounter = registry.counter("server.http.request.read.timeout");
         channelDeps.set(ZuulDependencyKeys.httpRequestReadTimeoutCounter, httpRequestReadTimeoutCounter);
         channelDeps.set(ZuulDependencyKeys.filterLoader, filterLoader);
         channelDeps.set(ZuulDependencyKeys.filterUsageNotifier, usageNotifier);
@@ -201,7 +235,7 @@ public abstract class BaseServerStartup {
         String listenAddressPropertyName = "server." + listenAddressName + "." + propertySuffix;
 
         Boolean value = new ChainedDynamicProperty.DynamicBooleanPropertyThatSupportsNull(
-                listenAddressPropertyName, null)
+                        listenAddressPropertyName, null)
                 .get();
         if (value == null) {
             value = new DynamicBooleanProperty(globalPropertyName, defaultValue)
@@ -224,12 +258,6 @@ public abstract class BaseServerStartup {
         config.add(new ChannelConfigValue<>(
                 CommonChannelConfigKeys.maxRequestsPerConnection,
                 chooseIntChannelProperty(listenAddressName, "connection.max.requests", 20000)));
-        config.add(new ChannelConfigValue<>(
-                CommonChannelConfigKeys.maxRequestsPerConnectionInBrownout,
-                chooseIntChannelProperty(
-                        listenAddressName,
-                        "connection.max.requests.brownout",
-                        CommonChannelConfigKeys.maxRequestsPerConnectionInBrownout.defaultValue())));
         config.add(new ChannelConfigValue<>(
                 CommonChannelConfigKeys.connectionExpiry,
                 chooseIntChannelProperty(
@@ -285,6 +313,20 @@ public abstract class BaseServerStartup {
         config.add(new ChannelConfigValue<>(
                 CommonChannelConfigKeys.maxHttp2HeaderListSize,
                 chooseIntChannelProperty(listenAddressName, "http2.maxheaderlistsize", 32768)));
+
+        config.add(new ChannelConfigValue<>(
+                CommonChannelConfigKeys.http2EncoderMaxResetFrames,
+                chooseIntChannelProperty(
+                        listenAddressName,
+                        "http2.maxResetFrames",
+                        CommonChannelConfigKeys.http2EncoderMaxResetFrames.defaultValue())));
+
+        config.add(new ChannelConfigValue<>(
+                CommonChannelConfigKeys.http2EncoderMaxResetFramesWindow,
+                chooseIntChannelProperty(
+                        listenAddressName,
+                        "http2.maxResetFramesWindow",
+                        CommonChannelConfigKeys.http2EncoderMaxResetFramesWindow.defaultValue())));
 
         // Override this to a lower value, as we'll be using ELB TCP listeners for h2, and therefore the connection
         // is direct from each device rather than shared in an ELB pool.

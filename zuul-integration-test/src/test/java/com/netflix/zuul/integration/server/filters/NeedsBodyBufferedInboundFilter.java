@@ -20,7 +20,7 @@ import com.netflix.zuul.Filter;
 import com.netflix.zuul.filters.FilterType;
 import com.netflix.zuul.filters.http.HttpInboundFilter;
 import com.netflix.zuul.message.http.HttpRequestMessage;
-import rx.Observable;
+import java.util.concurrent.CompletableFuture;
 
 @Filter(order = 20, type = FilterType.INBOUND)
 public class NeedsBodyBufferedInboundFilter extends HttpInboundFilter {
@@ -31,12 +31,12 @@ public class NeedsBodyBufferedInboundFilter extends HttpInboundFilter {
     }
 
     @Override
-    public boolean needsBodyBuffered(final HttpRequestMessage message) {
+    public boolean needsBodyBuffered(HttpRequestMessage message) {
         return BodyUtil.needsRequestBodyBuffering(message);
     }
 
     @Override
-    public Observable<HttpRequestMessage> applyAsync(final HttpRequestMessage input) {
-        return Observable.just(input);
+    public CompletableFuture<HttpRequestMessage> applyAsync(HttpRequestMessage input) {
+        return CompletableFuture.completedFuture(input);
     }
 }

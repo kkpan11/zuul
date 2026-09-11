@@ -20,7 +20,6 @@ import com.google.common.annotations.VisibleForTesting;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.BiConsumer;
@@ -36,7 +35,7 @@ import javax.annotation.Nullable;
  */
 public final class Attrs {
 
-    final Map<Key<?>, Object> storage = new IdentityHashMap<>();
+    final IdentityHashMap<Key<?>, Object> storage = new IdentityHashMap<>();
 
     public static <T> Key<T> newKey(String keyName) {
         return new Key<>(keyName);
@@ -117,10 +116,9 @@ public final class Attrs {
     @Override
     @VisibleForTesting
     public boolean equals(Object other) {
-        if (!(other instanceof Attrs)) {
+        if (!(other instanceof Attrs that)) {
             return false;
         }
-        Attrs that = (Attrs) other;
         return Objects.equals(this.storage, that.storage);
     }
 

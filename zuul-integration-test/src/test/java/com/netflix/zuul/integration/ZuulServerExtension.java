@@ -1,0 +1,160 @@
+/*
+ * Copyright 2025 Netflix, Inc.
+ *
+ *      Licensed under the Apache License, Version 2.0 (the "License");
+ *      you may not use this file except in compliance with the License.
+ *      You may obtain a copy of the License at
+ *
+ *          http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *      Unless required by applicable law or agreed to in writing, software
+ *      distributed under the License is distributed on an "AS IS" BASIS,
+ *      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *      See the License for the specific language governing permissions and
+ *      limitations under the License.
+ */
+
+package com.netflix.zuul.integration;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import com.netflix.client.config.CommonClientConfigKey;
+import com.netflix.config.ConfigurationManager;
+import com.netflix.spectator.api.Registry;
+import com.netflix.zuul.integration.server.Bootstrap;
+import com.netflix.zuul.origins.BasicNettyOriginManager;
+import com.netflix.zuul.origins.OriginManager;
+import io.netty.channel.group.ChannelGroup;
+import java.io.IOException;
+import java.net.ServerSocket;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
+import java.util.function.Function;
+import org.apache.commons.configuration.AbstractConfiguration;
+import org.junit.jupiter.api.extension.AfterAllCallback;
+import org.junit.jupiter.api.extension.BeforeAllCallback;
+import org.junit.jupiter.api.extension.ExtensionContext;
+
+/**
+ * Simple extension for managing the lifecycle of a zuul server for use in integration testing
+ *
+ * @author Justin Guerra
+ * @since 6/9/25
+ */
+public class ZuulServerExtension implements AfterAllCallback, BeforeAllCallback {
+
+    private final int eventLoopThreads;
+    private final Duration originReadTimeout;
+    private final Function<Registry, OriginManager<?>> originManagerFactory;
+
+    private Bootstrap bootstrap;
+    private int serverPort;
+    private int http2Port;
+
+    private ZuulServerExtension(Builder builder) {
+        this.eventLoopThreads = builder.eventLoopThreads;
+        this.originReadTimeout = builder.originReadTimeout;
+        this.originManagerFactory = builder.originManagerFactory;
+    }
+
+    @Override
+    public void beforeAll(ExtensionContext context) throws Exception {
+        int[] ports = findAvailableTcpPorts(2);
+        serverPort = ports[0];
+        http2Port = ports[1];
+
+        AbstractConfiguration config = ConfigurationManager.getConfigInstance();
+        config.setProperty("zuul.server.netty.socket.force_nio", "true");
+        config.setProperty("zuul.server.netty.threads.worker", String.valueOf(eventLoopThreads));
+        config.setProperty("zuul.server.port.main", serverPort);
+        config.setProperty("zuul.server.port.http2", http2Port);
+        config.setProperty("api.ribbon." + CommonClientConfigKey.ReadTimeout.key(), originReadTimeout.toMillis());
+        config.setProperty(
+                "api.ribbon.NIWSServerListClassName", "com.netflix.zuul.integration.server.OriginServerList");
+
+        // short circuit graceful shutdown
+        config.setProperty("server.outofservice.close.timeout", "0");
+        bootstrap = new Bootstrap(originManagerFactory);
+        bootstrap.start();
+        assertThat(bootstrap.isRunning()).isTrue();
+    }
+
+    @Override
+    public void afterAll(ExtensionContext context) throws Exception {
+        if (bootstrap != null) {
+            bootstrap.stop();
+        }
+    }
+
+    public int getServerPort() {
+        return serverPort;
+    }
+
+    public int getHttp2Port() {
+        return http2Port;
+    }
+
+    public ChannelGroup getClientChannels() {
+        return bootstrap.getClientChannels();
+    }
+
+    public static Builder newBuilder() {
+        return new Builder();
+    }
+
+    /**
+     * Reserves distinct free ports by holding every socket open until all have been bound, so no two callers are handed
+     * the same port.
+     */
+    private static int[] findAvailableTcpPorts(int count) {
+        List<ServerSocket> sockets = new ArrayList<>(count);
+        try {
+            int[] ports = new int[count];
+            for (int i = 0; i < count; i++) {
+                ServerSocket sock = new ServerSocket(0);
+                sockets.add(sock);
+                ports[i] = sock.getLocalPort();
+            }
+            return ports;
+        } catch (IOException e) {
+            throw new IllegalStateException("could not reserve free TCP ports", e);
+        } finally {
+            for (ServerSocket sock : sockets) {
+                try {
+                    sock.close();
+                } catch (IOException ignored) {
+                    // best effort
+                }
+            }
+        }
+    }
+
+    public static class Builder {
+        private int eventLoopThreads = 1;
+        private Duration originReadTimeout;
+        private Function<Registry, OriginManager<?>> originManagerFactory = BasicNettyOriginManager::new;
+
+        public Builder withEventLoopThreads(int eventLoopThreads) {
+            this.eventLoopThreads = eventLoopThreads;
+            return this;
+        }
+
+        public Builder withOriginReadTimeout(Duration originReadTimeout) {
+            this.originReadTimeout = originReadTimeout;
+            return this;
+        }
+
+        public Builder withOriginManagerFactory(Function<Registry, OriginManager<?>> originManagerFactory) {
+            this.originManagerFactory = originManagerFactory;
+            return this;
+        }
+
+        public ZuulServerExtension build() {
+            Objects.requireNonNull(originReadTimeout, "originReadTimeout cannot be null");
+            Objects.requireNonNull(originManagerFactory, "originManagerFactory cannot be null");
+            return new ZuulServerExtension(this);
+        }
+    }
+}

@@ -29,8 +29,6 @@ import io.netty.util.AttributeKey;
 public class HttpChannelFlags {
     public static final Flag IN_BROWNOUT = new Flag("_brownout");
 
-    public static final Flag CLOSING = new Flag("_connection_closing");
-
     public static class Flag {
         private final AttributeKey<Boolean> attributeKey;
 
@@ -39,15 +37,15 @@ public class HttpChannelFlags {
         }
 
         public void set(Channel ch) {
-            ch.attr(attributeKey).set(Boolean.TRUE);
-        }
-
-        public void remove(Channel ch) {
-            ch.attr(attributeKey).set(null);
+            ch.attr(attributeKey).set(true);
         }
 
         public void set(ChannelHandlerContext ctx) {
             set(ctx.channel());
+        }
+
+        public void remove(Channel ch) {
+            ch.attr(attributeKey).set(null);
         }
 
         public boolean get(Channel ch) {

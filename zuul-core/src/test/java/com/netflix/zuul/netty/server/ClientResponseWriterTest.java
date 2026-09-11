@@ -16,11 +16,12 @@
 
 package com.netflix.zuul.netty.server;
 
-import static com.google.common.truth.Truth.assertThat;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import com.netflix.netty.common.HttpLifecycleChannelHandler;
+import com.netflix.spectator.api.Counter;
+import com.netflix.spectator.api.DefaultRegistry;
+import com.netflix.spectator.api.Registry;
 import com.netflix.zuul.BasicRequestCompleteHandler;
 import com.netflix.zuul.context.CommonContextKeys;
 import com.netflix.zuul.context.SessionContext;
@@ -32,6 +33,7 @@ import com.netflix.zuul.message.util.HttpRequestBuilder;
 import com.netflix.zuul.stats.status.StatusCategory;
 import com.netflix.zuul.stats.status.StatusCategoryUtils;
 import com.netflix.zuul.stats.status.ZuulStatusCategory;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
@@ -42,9 +44,12 @@ import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.http.HttpVersion;
 import io.netty.util.ReferenceCountUtil;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 @ExtendWith(MockitoExtension.class)
@@ -52,12 +57,12 @@ class ClientResponseWriterTest {
 
     @Test
     void exemptClientTimeoutResponseBeforeRequestRead() {
-        final ClientResponseWriter responseWriter = new ClientResponseWriter(new BasicRequestCompleteHandler());
-        final EmbeddedChannel channel = new EmbeddedChannel();
+        ClientResponseWriter responseWriter = new ClientResponseWriter(new BasicRequestCompleteHandler());
+        EmbeddedChannel channel = new EmbeddedChannel();
 
-        final SessionContext context = new SessionContext();
+        SessionContext context = new SessionContext();
         StatusCategoryUtils.setStatusCategory(context, ZuulStatusCategory.FAILURE_CLIENT_TIMEOUT);
-        final HttpRequestMessage request = new HttpRequestBuilder(context).withDefaults();
+        HttpRequestMessage request = new HttpRequestBuilder(context).withDefaults();
         channel.attr(ClientRequestReceiver.ATTR_ZUUL_REQ).set(request);
 
         assertThat(responseWriter.shouldAllowPreemptiveResponse(channel)).isTrue();
@@ -65,12 +70,12 @@ class ClientResponseWriterTest {
 
     @Test
     void flagResponseBeforeRequestRead() {
-        final ClientResponseWriter responseWriter = new ClientResponseWriter(new BasicRequestCompleteHandler());
-        final EmbeddedChannel channel = new EmbeddedChannel();
+        ClientResponseWriter responseWriter = new ClientResponseWriter(new BasicRequestCompleteHandler());
+        EmbeddedChannel channel = new EmbeddedChannel();
 
-        final SessionContext context = new SessionContext();
+        SessionContext context = new SessionContext();
         StatusCategoryUtils.setStatusCategory(context, ZuulStatusCategory.FAILURE_LOCAL);
-        final HttpRequestMessage request = new HttpRequestBuilder(context).withDefaults();
+        HttpRequestMessage request = new HttpRequestBuilder(context).withDefaults();
         channel.attr(ClientRequestReceiver.ATTR_ZUUL_REQ).set(request);
 
         assertThat(responseWriter.shouldAllowPreemptiveResponse(channel)).isFalse();
@@ -79,8 +84,8 @@ class ClientResponseWriterTest {
     @Test
     void allowExtensionForPremptingResponse() {
 
-        final ZuulStatusCategory customStatus = ZuulStatusCategory.SUCCESS_LOCAL_NO_ROUTE;
-        final ClientResponseWriter responseWriter = new ClientResponseWriter(new BasicRequestCompleteHandler()) {
+        ZuulStatusCategory customStatus = ZuulStatusCategory.SUCCESS_LOCAL_NO_ROUTE;
+        ClientResponseWriter responseWriter = new ClientResponseWriter(new BasicRequestCompleteHandler()) {
             @Override
             protected boolean shouldAllowPreemptiveResponse(Channel channel) {
                 StatusCategory status =
@@ -89,10 +94,10 @@ class ClientResponseWriterTest {
             }
         };
 
-        final EmbeddedChannel channel = new EmbeddedChannel();
-        final SessionContext context = new SessionContext();
+        EmbeddedChannel channel = new EmbeddedChannel();
+        SessionContext context = new SessionContext();
         StatusCategoryUtils.setStatusCategory(context, customStatus);
-        final HttpRequestMessage request = new HttpRequestBuilder(context).withDefaults();
+        HttpRequestMessage request = new HttpRequestBuilder(context).withDefaults();
         channel.attr(ClientRequestReceiver.ATTR_ZUUL_REQ).set(request);
 
         assertThat(responseWriter.shouldAllowPreemptiveResponse(channel)).isTrue();
@@ -128,12 +133,146 @@ class ClientResponseWriterTest {
         channel.writeInbound(response);
 
         HttpResponseMessage zuulResponse = responseWriter.getZuulResponse();
-        assertNotNull(zuulResponse);
-        assertNotNull(nettyResp.get());
+        assertThat(zuulResponse).isNotNull();
+        assertThat(nettyResp.get()).isNotNull();
 
         channel.pipeline()
                 .fireUserEventTriggered(new HttpLifecycleChannelHandler.CompleteEvent(
                         HttpLifecycleChannelHandler.CompleteReason.SESSION_COMPLETE, null, nettyResp.get()));
-        assertNull(responseWriter.getZuulResponse());
+        assertThat(responseWriter.getZuulResponse()).isNull();
+    }
+
+    @Test
+    void buildHttpResponseCopiesAllHeadersToNettyResponse() {
+        ClientResponseWriter responseWriter = new ClientResponseWriter(new BasicRequestCompleteHandler());
+        EmbeddedChannel channel = new EmbeddedChannel(responseWriter);
+
+        AtomicReference<HttpResponse> nettyResp = new AtomicReference<>();
+        channel.pipeline().addFirst(new ChannelOutboundHandlerAdapter() {
+            @Override
+            public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
+                if (msg instanceof HttpResponse response) {
+                    nettyResp.set(response);
+                }
+                ReferenceCountUtil.safeRelease(msg);
+            }
+        });
+
+        SessionContext ctx = new SessionContext();
+        HttpRequestMessage request = new HttpRequestBuilder(ctx).build();
+        request.storeInboundRequest();
+
+        Headers headers = new Headers();
+        headers.add("X-Custom-Header", "one");
+        headers.add("Set-Cookie", "a=1");
+        headers.add("Set-Cookie", "b=2");
+        HttpResponseMessageImpl response = new HttpResponseMessageImpl(ctx, request, 200);
+        response.setHeaders(headers);
+
+        channel.attr(ClientRequestReceiver.ATTR_ZUUL_REQ).set(request);
+        DefaultHttpRequest nettyRequest = new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/");
+        ctx.set(CommonContextKeys.NETTY_HTTP_REQUEST, nettyRequest);
+
+        channel.pipeline().fireUserEventTriggered(new HttpLifecycleChannelHandler.StartEvent(nettyRequest));
+        channel.writeInbound(response);
+
+        HttpResponse out = nettyResp.get();
+        assertThat(out).isNotNull();
+
+        // original (non-normalised) case is preserved
+        assertThat(out.headers().names()).contains("X-Custom-Header");
+        assertThat(out.headers().get("X-Custom-Header")).isEqualTo("one");
+
+        // every entry is copied, including repeated names
+        assertThat(out.headers().getAll("Set-Cookie")).containsExactly("a=1", "b=2");
+    }
+
+    @Test
+    void doesNotWriteSecondResponseWhenFlushReentersChannelRead() {
+        ClientResponseWriter responseWriter = new ClientResponseWriter(new BasicRequestCompleteHandler());
+        EmbeddedChannel channel = new EmbeddedChannel(responseWriter);
+
+        SessionContext ctx = new SessionContext();
+        HttpRequestMessage request = new HttpRequestBuilder(ctx).build();
+        request.storeInboundRequest();
+        DefaultHttpRequest nettyRequest = new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/");
+        ctx.set(CommonContextKeys.NETTY_HTTP_REQUEST, nettyRequest);
+        channel.attr(ClientRequestReceiver.ATTR_ZUUL_REQ).set(request);
+
+        HttpResponseMessageImpl bufferedResponse = new HttpResponseMessageImpl(ctx, request, 200);
+        bufferedResponse.setHeaders(new Headers());
+
+        AtomicInteger responsesWritten = new AtomicInteger();
+
+        // simulate an error response flush completing and firing a CompleteEvent back up
+        channel.pipeline().addFirst(new ChannelOutboundHandlerAdapter() {
+            private boolean reentered;
+
+            @Override
+            public void write(ChannelHandlerContext context, Object msg, ChannelPromise promise) throws Exception {
+                if (msg instanceof HttpResponse) {
+                    responsesWritten.incrementAndGet();
+                }
+                ReferenceCountUtil.safeRelease(msg);
+                promise.setSuccess();
+                if (!reentered) {
+                    reentered = true;
+                    context.fireChannelRead(bufferedResponse);
+                }
+            }
+        });
+
+        channel.pipeline().fireUserEventTriggered(new HttpLifecycleChannelHandler.StartEvent(nettyRequest));
+        channel.pipeline().fireExceptionCaught(new RuntimeException("origin read timeout"));
+
+        assertThat(responsesWritten.get()).isEqualTo(1);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void warningOnlyForRequestsWithBody(boolean hasBodyChunk) {
+        Registry registry = new DefaultRegistry();
+        Counter warningCounter = registry.counter("server.http.requests.responseBeforeReceivedLastContent");
+        ClientResponseWriter responseWriter = new ClientResponseWriter(new BasicRequestCompleteHandler(), registry);
+        EmbeddedChannel channel = new EmbeddedChannel(responseWriter);
+
+        SessionContext ctx = new SessionContext();
+        HttpRequestMessage request = new HttpRequestBuilder(ctx).build();
+
+        if (hasBodyChunk) {
+            request.bufferBodyContents(new io.netty.handler.codec.http.DefaultHttpContent(
+                    Unpooled.copiedBuffer("body", java.nio.charset.StandardCharsets.UTF_8)));
+        }
+
+        request.storeInboundRequest();
+
+        HttpResponseMessageImpl response = new HttpResponseMessageImpl(ctx, request, 200);
+        response.setHeaders(new Headers());
+
+        channel.attr(ClientRequestReceiver.ATTR_ZUUL_REQ).set(request);
+        DefaultHttpRequest nettyRequest = new DefaultHttpRequest(
+                HttpVersion.HTTP_1_1,
+                hasBodyChunk ? HttpMethod.POST : HttpMethod.GET,
+                hasBodyChunk ? "/api" : "/favicon.ico");
+        ctx.set(CommonContextKeys.NETTY_HTTP_REQUEST, nettyRequest);
+
+        channel.pipeline().fireUserEventTriggered(new HttpLifecycleChannelHandler.StartEvent(nettyRequest));
+        channel.writeInbound(response);
+
+        assertThat(responseWriter.getZuulResponse()).isNotNull();
+        assertThat(request.hasBody()).isEqualTo(hasBodyChunk);
+
+        if (hasBodyChunk) {
+            assertThat(warningCounter.count())
+                    .as("should warn as is body expected")
+                    .isEqualTo(1);
+        } else {
+            assertThat(warningCounter.count())
+                    .as("should not warn as no body expected")
+                    .isEqualTo(0);
+        }
+
+        request.disposeBufferedBody();
+        channel.close();
     }
 }

@@ -16,13 +16,10 @@
 
 package com.netflix.zuul.netty.server;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isA;
-import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -33,27 +30,35 @@ import com.netflix.config.ConfigurationManager;
 import com.netflix.discovery.EurekaClient;
 import com.netflix.discovery.EurekaEventListener;
 import com.netflix.discovery.StatusChangeEvent;
-import com.netflix.zuul.netty.server.ClientConnectionsShutdown.ShutdownType;
+import com.netflix.netty.common.close.CloseReason;
+import com.netflix.netty.common.close.ConnectionCloseEvent;
+import com.netflix.netty.common.close.ConnectionCloseEvent.GracefulDelayed;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.DefaultEventLoop;
-import io.netty.channel.DefaultEventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
+import io.netty.channel.MultithreadEventLoopGroup;
 import io.netty.channel.group.ChannelGroup;
 import io.netty.channel.group.DefaultChannelGroup;
 import io.netty.channel.local.LocalAddress;
 import io.netty.channel.local.LocalChannel;
+import io.netty.channel.local.LocalIoHandler;
 import io.netty.channel.local.LocalServerChannel;
 import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.Promise;
+import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import org.apache.commons.configuration.AbstractConfiguration;
 import org.junit.jupiter.api.AfterAll;
@@ -72,16 +77,16 @@ class ClientConnectionsShutdownTest {
 
     // using LocalChannels instead of EmbeddedChannels to re-create threading behavior in an actual deployment
     private static LocalAddress LOCAL_ADDRESS;
-    private static DefaultEventLoopGroup SERVER_EVENT_LOOP;
-    private static DefaultEventLoopGroup CLIENT_EVENT_LOOP;
+    private static MultithreadEventLoopGroup SERVER_EVENT_LOOP;
+    private static MultithreadEventLoopGroup CLIENT_EVENT_LOOP;
     private static DefaultEventLoop EVENT_LOOP;
 
     @BeforeAll
     static void staticSetup() throws InterruptedException {
         LOCAL_ADDRESS = new LocalAddress(UUID.randomUUID().toString());
 
-        CLIENT_EVENT_LOOP = new DefaultEventLoopGroup(4);
-        SERVER_EVENT_LOOP = new DefaultEventLoopGroup(4);
+        CLIENT_EVENT_LOOP = new MultiThreadIoEventLoopGroup(4, LocalIoHandler.newFactory());
+        SERVER_EVENT_LOOP = new MultiThreadIoEventLoopGroup(4, LocalIoHandler.newFactory());
         ServerBootstrap serverBootstrap = new ServerBootstrap()
                 .group(SERVER_EVENT_LOOP)
                 .localAddress(LOCAL_ADDRESS)
@@ -125,7 +130,7 @@ class ClientConnectionsShutdownTest {
             ArgumentCaptor<EurekaEventListener> captor = ArgumentCaptor.forClass(EurekaEventListener.class);
             shutdown = spy(new ClientConnectionsShutdown(channels, executor, eureka));
             verify(eureka).registerEventListener(captor.capture());
-            doReturn(executor.newPromise()).when(shutdown).gracefullyShutdownClientChannels();
+            doReturn(Mockito.mock(Promise.class)).when(shutdown).gracefullyShutdownClientChannels();
 
             EurekaEventListener listener = captor.getValue();
 
@@ -161,7 +166,7 @@ class ClientConnectionsShutdownTest {
 
         channels.forEach(Channel::close);
         testPromise.await(10, TimeUnit.SECONDS);
-        assertTrue(channels.isEmpty());
+        assertThat(channels.isEmpty()).isTrue();
     }
 
     @Test
@@ -174,9 +179,9 @@ class ClientConnectionsShutdownTest {
             createChannels(10);
             shutdown.gracefullyShutdownClientChannels().await(10, TimeUnit.SECONDS);
 
-            assertTrue(
-                    channels.isEmpty(),
-                    "All channels in group should have been force closed after the timeout was triggered");
+            assertThat(channels.isEmpty())
+                    .as("All channels in group should have been force closed after the timeout was triggered")
+                    .isTrue();
         } finally {
             configuration.setProperty(configName, "30");
         }
@@ -210,8 +215,12 @@ class ClientConnectionsShutdownTest {
             channels.add(connect.channel());
 
             boolean await = shutdown.gracefullyShutdownClientChannels().await(10, TimeUnit.SECONDS);
-            assertTrue(await, "the promise should finish even if a channel failed to close");
-            assertEquals(1, channels.size(), "all other channels should have been closed");
+            assertThat(await)
+                    .as("the promise should finish even if a channel failed to close")
+                    .isTrue();
+            assertThat(channels.size())
+                    .as("all other channels should have been closed")
+                    .isEqualTo(1);
         } finally {
             configuration.setProperty(configName, "30");
         }
@@ -228,26 +237,37 @@ class ClientConnectionsShutdownTest {
         try {
             configuration.setProperty(configName, "0");
             createChannels(10);
-            Promise<Void> promise = shutdown.gracefullyShutdownClientChannels(ShutdownType.OUT_OF_SERVICE);
+            Promise<Void> promise = shutdown.gracefullyShutdownClientChannels(CloseReason.OUT_OF_SERVICE);
             verify(eventLoop, never()).schedule(isA(Runnable.class), anyLong(), isA(TimeUnit.class));
             channels.forEach(Channel::close);
 
             promise.await(10, TimeUnit.SECONDS);
-            assertTrue(channels.isEmpty(), "All channels in group should have been closed");
+            assertThat(channels.isEmpty())
+                    .as("All channels in group should have been closed")
+                    .isTrue();
         } finally {
             configuration.setProperty(configName, "30");
         }
     }
 
     @Test
-    public void shutdownTypeForwardedToFlag() throws InterruptedException {
-        shutdown = spy(shutdown);
-        doNothing().when(shutdown).flagChannelForClose(any(), any());
+    void closeReasonForwardedToFiredCloseEvent() throws Exception {
         createChannels(1);
         Channel channel = channels.iterator().next();
-        for (ShutdownType type : ShutdownType.values()) {
-            shutdown.gracefullyShutdownClientChannels(type);
-            verify(shutdown).flagChannelForClose(channel, type);
+        CloseEventCaptor captor = new CloseEventCaptor();
+        channel.pipeline().addLast(captor);
+
+        for (CloseReason reason : List.of(CloseReason.SHUTDOWN, CloseReason.OUT_OF_SERVICE)) {
+            shutdown.gracefullyShutdownClientChannels(reason);
+            ConnectionCloseEvent event = captor.awaitEvent();
+            assertThat(event.reason()).isEqualTo(reason);
+
+            if (reason == CloseReason.SHUTDOWN) {
+                assertThat(event).isInstanceOf(ConnectionCloseEvent.Graceful.class);
+            } else {
+                assertThat(event).isInstanceOf(ConnectionCloseEvent.GracefulDelayed.class);
+                assertThat(((GracefulDelayed) event).maxJitter()).isPositive();
+            }
         }
 
         channels.close().await(5, TimeUnit.SECONDS);
@@ -269,6 +289,26 @@ class ClientConnectionsShutdownTest {
                     .sync();
 
             channels.add(connect.channel());
+        }
+    }
+
+    private static final class CloseEventCaptor extends ChannelInboundHandlerAdapter {
+        private final BlockingQueue<ConnectionCloseEvent> events = new LinkedBlockingQueue<>();
+
+        @Override
+        public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
+            if (evt instanceof ConnectionCloseEvent closeEvent) {
+                events.add(closeEvent);
+            }
+            ctx.fireUserEventTriggered(evt);
+        }
+
+        ConnectionCloseEvent awaitEvent() throws InterruptedException {
+            ConnectionCloseEvent event = events.poll(5, TimeUnit.SECONDS);
+            assertThat(event)
+                    .as("expected a CloseEvent to be fired on the channel")
+                    .isNotNull();
+            return event;
         }
     }
 }

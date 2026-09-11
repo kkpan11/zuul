@@ -22,6 +22,7 @@ import com.google.common.collect.Sets;
 import com.netflix.client.config.CommonClientConfigKey;
 import com.netflix.client.config.IClientConfig;
 import com.netflix.loadbalancer.DynamicServerListLoadBalancer;
+import com.netflix.loadbalancer.LoadBalancerStats;
 import com.netflix.loadbalancer.Server;
 import com.netflix.niws.loadbalancer.DiscoveryEnabledServer;
 import com.netflix.zuul.resolver.Resolver;
@@ -76,7 +77,7 @@ public class DynamicServerResolver implements Resolver<DiscoveryResult> {
 
     @Override
     public DiscoveryResult resolve(@Nullable Object key) {
-        final Server server = loadBalancer.chooseServer(key);
+        Server server = loadBalancer.chooseServer(key);
         return server != null
                 ? new DiscoveryResult((DiscoveryEnabledServer) server, loadBalancer.getLoadBalancerStats())
                 : DiscoveryResult.EMPTY;
@@ -85,6 +86,15 @@ public class DynamicServerResolver implements Resolver<DiscoveryResult> {
     @Override
     public boolean hasServers() {
         return !loadBalancer.getReachableServers().isEmpty();
+    }
+
+    @Override
+    public List<DiscoveryResult> getServers() {
+        LoadBalancerStats lbStats = loadBalancer.getLoadBalancerStats();
+        return loadBalancer.getAllServers().stream()
+                .filter(DiscoveryEnabledServer.class::isInstance)
+                .map(server -> new DiscoveryResult((DiscoveryEnabledServer) server, lbStats))
+                .collect(Collectors.toList());
     }
 
     @Override
@@ -119,7 +129,7 @@ public class DynamicServerResolver implements Resolver<DiscoveryResult> {
     void onUpdate(List<Server> oldList, List<Server> newList) {
         Set<Server> oldSet = new HashSet<>(oldList);
         Set<Server> newSet = new HashSet<>(newList);
-        final List<DiscoveryResult> discoveryResults = Sets.difference(oldSet, newSet).stream()
+        List<DiscoveryResult> discoveryResults = Sets.difference(oldSet, newSet).stream()
                 .map(server ->
                         new DiscoveryResult((DiscoveryEnabledServer) server, loadBalancer.getLoadBalancerStats()))
                 .collect(Collectors.toList());

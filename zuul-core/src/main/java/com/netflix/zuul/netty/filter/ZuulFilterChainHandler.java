@@ -16,14 +16,13 @@
 
 package com.netflix.zuul.netty.filter;
 
-import com.google.common.base.Preconditions;
 import com.netflix.netty.common.HttpLifecycleChannelHandler;
 import com.netflix.netty.common.HttpLifecycleChannelHandler.CompleteEvent;
 import com.netflix.netty.common.HttpRequestReadTimeoutEvent;
 import com.netflix.zuul.context.CommonContextKeys;
 import com.netflix.zuul.context.SessionContext;
 import com.netflix.zuul.filters.ZuulFilter;
-import com.netflix.zuul.filters.endpoint.ProxyEndpoint;
+import com.netflix.zuul.filters.endpoint.EndpointLifecycle;
 import com.netflix.zuul.message.Headers;
 import com.netflix.zuul.message.http.HttpRequestMessage;
 import com.netflix.zuul.message.http.HttpResponseMessage;
@@ -44,6 +43,7 @@ import io.netty.handler.timeout.IdleStateEvent;
 import io.netty.util.ReferenceCountUtil;
 import java.nio.channels.ClosedChannelException;
 import javax.net.ssl.SSLException;
+import lombok.NonNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -59,24 +59,24 @@ public class ZuulFilterChainHandler extends ChannelInboundHandlerAdapter {
     private static final Logger logger = LoggerFactory.getLogger(ZuulFilterChainHandler.class);
 
     public ZuulFilterChainHandler(
-            ZuulFilterChainRunner<HttpRequestMessage> requestFilterChain,
-            ZuulFilterChainRunner<HttpResponseMessage> responseFilterChain) {
-        this.requestFilterChain = Preconditions.checkNotNull(requestFilterChain, "request filter chain");
-        this.responseFilterChain = Preconditions.checkNotNull(responseFilterChain, "response filter chain");
+            @NonNull ZuulFilterChainRunner<HttpRequestMessage> requestFilterChain,
+            @NonNull ZuulFilterChainRunner<HttpResponseMessage> responseFilterChain) {
+        this.requestFilterChain = requestFilterChain;
+        this.responseFilterChain = responseFilterChain;
     }
 
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
-        if (msg instanceof HttpRequestMessage) {
-            zuulRequest = (HttpRequestMessage) msg;
+        if (msg instanceof HttpRequestMessage httpRequestMessage) {
+            zuulRequest = httpRequestMessage;
 
             // Replace NETTY_SERVER_CHANNEL_HANDLER_CONTEXT in SessionContext
-            final SessionContext zuulCtx = zuulRequest.getContext();
+            SessionContext zuulCtx = zuulRequest.getContext();
             zuulCtx.put(CommonContextKeys.NETTY_SERVER_CHANNEL_HANDLER_CONTEXT, ctx);
 
             requestFilterChain.filter(zuulRequest);
-        } else if ((msg instanceof HttpContent) && (zuulRequest != null)) {
-            requestFilterChain.filter(zuulRequest, (HttpContent) msg);
+        } else if ((msg instanceof HttpContent httpContent) && (zuulRequest != null)) {
+            requestFilterChain.filter(zuulRequest, httpContent);
         } else {
             logger.debug(
                     "Received unrecognized message type. {}", msg.getClass().getName());
@@ -86,8 +86,8 @@ public class ZuulFilterChainHandler extends ChannelInboundHandlerAdapter {
 
     @Override
     public final void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
-        if (evt instanceof CompleteEvent) {
-            final CompleteEvent completeEvent = (CompleteEvent) evt;
+        if (evt instanceof CompleteEvent completeEvent) {
+
             fireEndpointFinish(
                     completeEvent.getReason() != HttpLifecycleChannelHandler.CompleteReason.SESSION_COMPLETE, ctx);
         } else if (evt instanceof HttpRequestReadTimeoutEvent) {
@@ -106,15 +106,15 @@ public class ZuulFilterChainHandler extends ChannelInboundHandlerAdapter {
         super.userEventTriggered(ctx, evt);
     }
 
-    private void sendResponse(final StatusCategory statusCategory, final int status, ChannelHandlerContext ctx) {
+    private void sendResponse(StatusCategory statusCategory, int status, ChannelHandlerContext ctx) {
         if (zuulRequest == null) {
             ctx.close();
         } else {
-            final SessionContext zuulCtx = zuulRequest.getContext();
+            SessionContext zuulCtx = zuulRequest.getContext();
             zuulRequest.getContext().cancel();
             StatusCategoryUtils.storeStatusCategoryIfNotAlreadyFailure(zuulCtx, statusCategory);
-            final HttpResponseMessage zuulResponse = new HttpResponseMessageImpl(zuulCtx, zuulRequest, status);
-            final Headers headers = zuulResponse.getHeaders();
+            HttpResponseMessage zuulResponse = new HttpResponseMessageImpl(zuulCtx, zuulRequest, status);
+            Headers headers = zuulResponse.getHeaders();
             headers.add("Connection", "close");
             headers.add("Content-Length", "0");
             zuulResponse.finishBufferedBodyIfIncomplete();
@@ -127,14 +127,13 @@ public class ZuulFilterChainHandler extends ChannelInboundHandlerAdapter {
         return zuulRequest;
     }
 
-    protected void fireEndpointFinish(final boolean error, final ChannelHandlerContext ctx) {
+    protected void fireEndpointFinish(boolean error, ChannelHandlerContext ctx) {
         // make sure filter chain is not left hanging
         finishResponseFilters(ctx);
 
-        final ZuulFilter endpoint = ZuulEndPointRunner.getEndpoint(zuulRequest);
-        if (endpoint instanceof ProxyEndpoint) {
-            final ProxyEndpoint edgeProxyEndpoint = (ProxyEndpoint) endpoint;
-            edgeProxyEndpoint.finish(error);
+        ZuulFilter endpoint = ZuulEndPointRunner.getEndpoint(zuulRequest);
+        if (endpoint instanceof EndpointLifecycle lifecycleEndpoint) {
+            lifecycleEndpoint.finish(error);
         }
         zuulRequest = null;
     }
@@ -166,7 +165,7 @@ public class ZuulFilterChainHandler extends ChannelInboundHandlerAdapter {
                     cause);
         }
         if (zuulRequest != null && !isClientChannelClosed(cause)) {
-            final SessionContext zuulCtx = zuulRequest.getContext();
+            SessionContext zuulCtx = zuulRequest.getContext();
             zuulCtx.setError(cause);
             zuulCtx.setShouldSendErrorResponse(true);
             sendResponse(ZuulStatusCategory.FAILURE_LOCAL, 500, ctx);

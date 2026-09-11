@@ -71,7 +71,7 @@ public class BasicNettyOrigin implements NettyOrigin {
         this.originName = Objects.requireNonNull(originName, "originName");
         this.registry = registry;
         this.config = setupClientConfig(originName);
-        this.clientChannelManager = new DefaultClientChannelManager(originName, config, registry);
+        this.clientChannelManager = createClientChannelManager(originName, config, registry);
         this.clientChannelManager.init();
         this.requestAttemptFactory = new NettyRequestAttemptFactory();
 
@@ -92,6 +92,20 @@ public class BasicNettyOrigin implements NettyOrigin {
         niwsClientConfig.set(CommonClientConfigKey.ClientClassName, originName.getNiwsClientName());
         niwsClientConfig.loadProperties(originName.getNiwsClientName());
         return niwsClientConfig;
+    }
+
+    /**
+     * Factory method to create the ClientChannelManager.
+     * Override this method in subclasses to provide a custom ClientChannelManager implementation.
+     *
+     * @param originName the origin name
+     * @param config the client configuration
+     * @param registry the Spectator registry
+     * @return a ClientChannelManager instance
+     */
+    protected ClientChannelManager createClientChannelManager(
+            OriginName originName, IClientConfig config, Registry registry) {
+        return new DefaultClientChannelManager(originName, config, registry);
     }
 
     @Override
@@ -134,7 +148,7 @@ public class BasicNettyOrigin implements NettyOrigin {
 
     @Override
     public String getIpAddrFromServer(DiscoveryResult discoveryResult) {
-        final Optional<String> ipAddr = discoveryResult.getIPAddr();
+        Optional<String> ipAddr = discoveryResult.getIPAddr();
         return ipAddr.isPresent() ? ipAddr.get() : null;
     }
 
@@ -154,11 +168,11 @@ public class BasicNettyOrigin implements NettyOrigin {
             return;
         }
 
-        final SessionContext zuulCtx = requestMsg.getContext();
+        SessionContext zuulCtx = requestMsg.getContext();
 
         // Choose StatusCategory based on the ErrorType.
-        final ErrorType et = requestAttemptFactory.mapNettyToOutboundErrorType(throwable);
-        final StatusCategory nfs = et.getStatusCategory();
+        ErrorType et = requestAttemptFactory.mapNettyToOutboundErrorType(throwable);
+        StatusCategory nfs = et.getStatusCategory();
         StatusCategoryUtils.setStatusCategory(zuulCtx, nfs);
         StatusCategoryUtils.setOriginStatusCategory(zuulCtx, nfs);
 
@@ -168,7 +182,7 @@ public class BasicNettyOrigin implements NettyOrigin {
     @Override
     public void recordFinalResponse(HttpResponseMessage resp) {
         if (resp != null) {
-            final SessionContext zuulCtx = resp.getContext();
+            SessionContext zuulCtx = resp.getContext();
 
             // Store the status code of final attempt response.
             int originStatusCode = resp.getStatus();

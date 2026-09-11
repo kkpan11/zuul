@@ -16,8 +16,8 @@
 
 package com.netflix.zuul.filters.endpoint;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.fail;
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
@@ -26,6 +26,7 @@ import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 import com.netflix.appinfo.InstanceInfo;
@@ -34,31 +35,42 @@ import com.netflix.zuul.context.CommonContextKeys;
 import com.netflix.zuul.context.SessionContext;
 import com.netflix.zuul.discovery.DiscoveryResult;
 import com.netflix.zuul.exception.OutboundErrorType;
+import com.netflix.zuul.message.http.HttpQueryParams;
 import com.netflix.zuul.message.http.HttpRequestMessage;
 import com.netflix.zuul.message.http.HttpRequestMessageImpl;
 import com.netflix.zuul.message.http.HttpResponseMessage;
 import com.netflix.zuul.netty.NettyRequestAttemptFactory;
+import com.netflix.zuul.netty.connectionpool.DefaultOriginChannelInitializer;
 import com.netflix.zuul.netty.connectionpool.PooledConnection;
 import com.netflix.zuul.netty.server.MethodBinding;
 import com.netflix.zuul.netty.timeouts.OriginTimeoutManager;
+import com.netflix.zuul.niws.RequestAttempt;
 import com.netflix.zuul.niws.RequestAttempts;
 import com.netflix.zuul.origins.BasicNettyOriginManager;
 import com.netflix.zuul.origins.NettyOrigin;
 import com.netflix.zuul.passport.CurrentPassport;
 import com.netflix.zuul.passport.PassportItem;
 import com.netflix.zuul.passport.PassportState;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.channel.local.LocalAddress;
 import io.netty.handler.codec.http.DefaultHttpResponse;
+import io.netty.handler.codec.http.DefaultLastHttpContent;
+import io.netty.handler.codec.http.HttpContent;
 import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpVersion;
+import io.netty.handler.codec.http.LastHttpContent;
+import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.Promise;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
+import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
@@ -84,29 +96,18 @@ class ProxyEndpointTest {
     private HttpRequestMessage request;
     private HttpResponse response;
     private CurrentPassport passport;
+    private EmbeddedChannel channel;
 
     @BeforeEach
     void setup() {
-        EmbeddedChannel channel = new EmbeddedChannel();
+        channel = new EmbeddedChannel();
         doReturn(channel).when(chc).channel();
 
         context = new SessionContext();
-        request = new HttpRequestMessageImpl(
-                context,
-                "HTTP/1.1",
-                "POST",
-                "/some/where",
-                null,
-                null,
-                "192.168.0.2",
-                "https",
-                7002,
-                "localhost",
-                new LocalAddress("777"),
-                false);
+        request = createRequest(context, "POST", "/some/where");
         request.storeInboundRequest();
 
-        request.setBody("Hello There".getBytes());
+        request.setBody("Hello There".getBytes(UTF_8));
         BasicNettyOriginManager originManager = new BasicNettyOriginManager(Spectator.globalRegistry());
 
         context.set(CommonContextKeys.ORIGIN_MANAGER, originManager);
@@ -135,9 +136,17 @@ class ProxyEndpointTest {
     }
 
     @Test
+    void testRecordProxyRequestEndIsCalledOnce() {
+        proxyEndpoint.apply(request);
+        proxyEndpoint.finish(false);
+
+        verify(nettyOrigin, times(1)).recordProxyRequestEnd();
+    }
+
+    @Test
     void testRetryWillResetBodyReader() {
 
-        assertEquals("Hello There", new String(request.getBody()));
+        assertThat(new String(request.getBody(), UTF_8)).isEqualTo("Hello There");
 
         // move the body readerIndex to the end to mimic nettys behavior after writing to the origin channel
         request.getBodyContents()
@@ -149,7 +158,58 @@ class ProxyEndpointTest {
 
         // when retrying a response, the request body reader should have it's indexes reset
         proxyEndpoint.handleOriginNonSuccessResponse(response, discoveryResult);
-        assertEquals("Hello There", new String(request.getBody()));
+        assertThat(new String(request.getBody(), UTF_8)).isEqualTo("Hello There");
+    }
+
+    @Test
+    void bufferedBodyReplayGivesEachOriginAttemptIndependentReaderIndex() {
+        // Each origin attempt/retry must get its own reader index over the shared buffered body.
+        // With a "plain" retain, it shares one ByteBuf across attempts, so when a retry drains it the
+        // first attempt's netty CoalescingBufferQueue is left with readableBytes > 0 and
+        // nothing to produce - so results in an empty-frame OOM (netty #11959)
+        EmbeddedChannel attempt1 = new EmbeddedChannel();
+        EmbeddedChannel attempt2 = new EmbeddedChannel();
+
+        proxyEndpoint.writeBufferedBodyContent(request, attempt1);
+        proxyEndpoint.writeBufferedBodyContent(request, attempt2);
+        attempt1.flush();
+        attempt2.flush();
+
+        // the retry's origin fully consumes the body it was handed, exactly as netty advances the reader index
+        // while wrapping the DATA frame
+        consumeAndRelease(attempt2);
+
+        // the first (slow) attempt must still see the full body - its reader index independent of the retry's
+        assertThat(readContentAndRelease(attempt1)).isEqualTo("Hello There");
+
+        request.disposeBufferedBody();
+        attempt1.finishAndReleaseAll();
+        attempt2.finishAndReleaseAll();
+    }
+
+    /**
+     * Drains everything the origin channel was handed, advancing each content chunk's reader index the way a
+     * socket write does.
+     */
+    private static void consumeAndRelease(EmbeddedChannel channel) {
+        Object msg;
+        while ((msg = channel.readOutbound()) != null) {
+            if (msg instanceof HttpContent chunk) {
+                ByteBuf content = chunk.content();
+                content.skipBytes(content.readableBytes());
+            }
+            ReferenceCountUtil.release(msg);
+        }
+    }
+
+    private static String readContentAndRelease(EmbeddedChannel channel) {
+        StringBuilder body = new StringBuilder();
+        HttpContent chunk;
+        while ((chunk = channel.readOutbound()) != null) {
+            body.append(chunk.content().toString(UTF_8));
+            chunk.release();
+        }
+        return body.toString();
     }
 
     @Test
@@ -209,13 +269,199 @@ class ProxyEndpointTest {
         validateNoRetry();
     }
 
+    @Test
+    void closeNotifyConnectionRetriedOnlyForIdempotentMethods() {
+        assertThat(proxyEndpoint.isRetryable(OutboundErrorType.CLOSE_NOTIFY_CONNECTION))
+                .isFalse();
+
+        HttpRequestMessage getRequest = createRequest(context, "GET", "/some/where");
+        getRequest.setBody(new byte[0]);
+        getRequest.storeInboundRequest();
+        ProxyEndpoint getProxyEndpoint =
+                spy(new ProxyEndpoint(getRequest, chc, null, MethodBinding.NO_OP_BINDING, attemptFactory) {
+                    @Override
+                    public NettyOrigin getOrigin(HttpRequestMessage request) {
+                        return nettyOrigin;
+                    }
+
+                    @Override
+                    protected OriginTimeoutManager getTimeoutManager(NettyOrigin origin) {
+                        return timeoutManager;
+                    }
+                });
+
+        assertThat(getProxyEndpoint.isRetryable(OutboundErrorType.CLOSE_NOTIFY_CONNECTION))
+                .isTrue();
+    }
+
+    @Test
+    void connectionErrorsRetriedForAnyMethod() {
+        assertThat(proxyEndpoint.isRetryable(OutboundErrorType.RESET_CONNECTION))
+                .isTrue();
+        assertThat(proxyEndpoint.isRetryable(OutboundErrorType.CONNECT_ERROR)).isTrue();
+    }
+
+    /**
+     * Rebuilds the endpoint against an already-connected pooled origin, so content chunks stream straight through
+     * to {@link #channel} instead of being buffered while the connect promise is outstanding.
+     */
+    private void proxyToConnectedOrigin() {
+        Promise<PooledConnection> promise = channel.eventLoop().newPromise();
+
+        PooledConnection pooledConnection = Mockito.mock(PooledConnection.class);
+        promise.setSuccess(pooledConnection);
+
+        doReturn(channel).when(pooledConnection).getChannel();
+        doReturn(promise).when(nettyOrigin).connectToOrigin(any(), any(), anyInt(), any(), any(), any());
+
+        doReturn(Mockito.mock(RequestAttempt.class)).when(nettyOrigin).newRequestAttempt(any(), any(), any(), anyInt());
+
+        request = createRequest(context, "POST", "/some/where");
+        request.storeInboundRequest();
+
+        proxyEndpoint = spy(new ProxyEndpoint(request, chc, null, MethodBinding.NO_OP_BINDING, attemptFactory) {
+            @Override
+            public NettyOrigin getOrigin(HttpRequestMessage request) {
+                return nettyOrigin;
+            }
+
+            @Override
+            protected OriginTimeoutManager getTimeoutManager(NettyOrigin origin) {
+                return timeoutManager;
+            }
+        });
+
+        channel.pipeline()
+                .addLast(DefaultOriginChannelInitializer.CONNECTION_POOL_HANDLER, new ChannelInboundHandlerAdapter());
+
+        proxyEndpoint.apply(request);
+    }
+
+    @Test
+    void lastContentAfterProxyStartedIsConsideredReplayable() {
+        proxyToConnectedOrigin();
+
+        LastHttpContent lastContent = new DefaultLastHttpContent();
+        assertThat(proxyEndpoint.isRequestReplayable()).isFalse();
+        proxyEndpoint.processContentChunk(request, lastContent);
+        assertThat(proxyEndpoint.isRequestReplayable()).isTrue();
+
+        channel.releaseOutbound();
+        assertThat(lastContent.refCnt())
+                .as("ref count should be 1 in case a retry is needed")
+                .isEqualTo(1);
+        ReferenceCountUtil.safeRelease(lastContent);
+    }
+
+    @Test
+    void lastContentBufferedAfterProxyStartedSurvivesTheWriteToTheOrigin() {
+        proxyToConnectedOrigin();
+
+        proxyEndpoint.processContentChunk(
+                request, new DefaultLastHttpContent(Unpooled.copiedBuffer("Hello There", UTF_8)));
+        consumeAndRelease(channel);
+
+        EmbeddedChannel retry = new EmbeddedChannel();
+        proxyEndpoint.writeBufferedBodyContent(request, retry);
+        retry.flush();
+
+        assertThat(readContentAndRelease(retry)).isEqualTo("Hello There");
+
+        request.disposeBufferedBody();
+        retry.finishAndReleaseAll();
+        channel.finishAndReleaseAll();
+    }
+
+    @Test
+    void testMassageRequestURIWithEncodedAmpersand() {
+        // Test that encoded ampersands in query parameter values are handled correctly
+        // and do not create additional parameters
+        SessionContext context = new SessionContext();
+        context.set("overrideURI", "/path?param=123%26hidden%3Dvalue");
+
+        HttpRequestMessage request = createRequest(context, "GET", "/original");
+        HttpRequestMessage result = ProxyEndpoint.massageRequestURI(request);
+
+        assertThat(result.getPath()).isEqualTo("/path");
+        HttpQueryParams params = result.getQueryParams();
+        assertThat(params.getFirst("param")).isEqualTo("123&hidden=value");
+        assertThat(params.contains("hidden")).isFalse();
+    }
+
+    @Test
+    void testMassageRequestURIWithMultipleEncodedParams() {
+        SessionContext context = new SessionContext();
+        context.set("overrideURI", "/path?foo=bar&param=a%26b&another=test%3Dvalue");
+
+        HttpRequestMessage request = createRequest(context, "GET", "/original");
+        HttpRequestMessage result = ProxyEndpoint.massageRequestURI(request);
+
+        assertThat(result.getPath()).isEqualTo("/path");
+        HttpQueryParams params = result.getQueryParams();
+        assertThat(params.getFirst("foo")).isEqualTo("bar");
+        assertThat(params.getFirst("param")).isEqualTo("a&b");
+        assertThat(params.getFirst("another")).isEqualTo("test=value");
+    }
+
+    @Test
+    void testMassageRequestURIWithNoQueryString() {
+        SessionContext context = new SessionContext();
+        context.set("overrideURI", "/path/to/resource");
+
+        HttpRequestMessage request = createRequest(context, "GET", "/original");
+        HttpRequestMessage result = ProxyEndpoint.massageRequestURI(request);
+
+        assertThat(result.getPath()).isEqualTo("/path/to/resource");
+        assertThat(result.getQueryParams().entries()).isEmpty();
+    }
+
+    @Test
+    void testMassageRequestURIWithRequestURIContext() {
+        SessionContext context = new SessionContext();
+        context.set("requestURI", "/contextpath?key=value%20with%20spaces");
+
+        HttpRequestMessage request = createRequest(context, "GET", "/original");
+        HttpRequestMessage result = ProxyEndpoint.massageRequestURI(request);
+
+        assertThat(result.getPath()).isEqualTo("/contextpath");
+        HttpQueryParams params = result.getQueryParams();
+        assertThat(params.getFirst("key")).isEqualTo("value with spaces");
+    }
+
+    @Test
+    void testMassageRequestURIOverrideURITakesPrecedence() {
+        // Test that overrideURI takes precedence over requestURI
+        SessionContext context = new SessionContext();
+        context.set("requestURI", "/first?key=first");
+        context.set("overrideURI", "/second?key=second");
+
+        HttpRequestMessage request = createRequest(context, "GET", "/original");
+        HttpRequestMessage result = ProxyEndpoint.massageRequestURI(request);
+
+        assertThat(result.getPath()).isEqualTo("/second");
+        HttpQueryParams params = result.getQueryParams();
+        assertThat(params.getFirst("key")).isEqualTo("second");
+    }
+
+    @Test
+    void testMassageRequestURIWithNoContextOverride() {
+        // Test that when neither requestURI nor overrideURI are set, the request is returned unchanged
+        SessionContext context = new SessionContext();
+
+        HttpRequestMessage request = createRequest(context, "GET", "/original");
+        HttpRequestMessage result = ProxyEndpoint.massageRequestURI(request);
+
+        // Path and query params should remain as they were in the original request
+        assertThat(result).isSameAs(request);
+    }
+
     private void validateNoRetry() {
         verify(nettyOrigin, never()).connectToOrigin(any(), any(), anyInt(), any(), any(), any());
         passport.getHistory().stream()
                 .map(PassportItem::getState)
                 .filter(s -> s == PassportState.ORIGIN_RETRY_START)
                 .findAny()
-                .ifPresent(s -> fail());
+                .ifPresent(s -> org.junit.jupiter.api.Assertions.fail());
     }
 
     private void disableRetriesOnAdjustment() {
@@ -236,7 +482,72 @@ class ProxyEndpointTest {
         return DiscoveryResult.from(instanceInfo, true);
     }
 
+    // --- 1xx interim response tests ---
+
+    @Test
+    void interimResponseIsSwallowedWithoutForwardingOrStartingResponse() {
+        proxyEndpoint.responseFromOrigin(new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.EARLY_HINTS));
+
+        // 1xx is swallowed: nothing is forwarded to the client and the response cycle has not started
+        verify(proxyEndpoint, never()).invokeNext(any(HttpResponseMessage.class));
+        assertThat(proxyEndpoint.startedSendingResponseToClient).isFalse();
+    }
+
+    @Test
+    void finalResponseIsForwardedAfterSwallowedInterimResponse() {
+        // 1xx from origin: HttpResponse(103) then empty LastHttpContent
+        proxyEndpoint.responseFromOrigin(new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.EARLY_HINTS));
+        proxyEndpoint.invokeNext(LastHttpContent.EMPTY_LAST_CONTENT);
+
+        // Real 200 arrives next - must still be routed to the client
+        proxyEndpoint.responseFromOrigin(new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK));
+
+        // only the final 200 is forwarded; the 103 was swallowed
+        verify(proxyEndpoint, times(1)).invokeNext(any(HttpResponseMessage.class));
+        assertThat(proxyEndpoint.startedSendingResponseToClient).isTrue();
+    }
+
+    @Test
+    void multipleInterimResponsesAreSwallowedBeforeFinalResponse() {
+        proxyEndpoint.responseFromOrigin(new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.PROCESSING));
+        proxyEndpoint.invokeNext(LastHttpContent.EMPTY_LAST_CONTENT);
+
+        proxyEndpoint.responseFromOrigin(new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.EARLY_HINTS));
+        proxyEndpoint.invokeNext(LastHttpContent.EMPTY_LAST_CONTENT);
+
+        proxyEndpoint.responseFromOrigin(new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK));
+
+        // both 1xx responses are swallowed; only the final 200 is forwarded
+        verify(proxyEndpoint, times(1)).invokeNext(any(HttpResponseMessage.class));
+        assertThat(proxyEndpoint.startedSendingResponseToClient).isTrue();
+    }
+
+    @Test
+    void interimResponseTrailingLastContentIsNotForwarded() {
+        proxyEndpoint.responseFromOrigin(new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.EARLY_HINTS));
+        proxyEndpoint.invokeNext(LastHttpContent.EMPTY_LAST_CONTENT);
+
+        // the empty terminator that Netty emits after a 1xx must be dropped, not forwarded to the client
+        verify(chc, never()).fireChannelRead(any());
+    }
+
     private void createResponse(HttpResponseStatus status) {
         response = new DefaultHttpResponse(HttpVersion.HTTP_1_1, status);
+    }
+
+    private HttpRequestMessage createRequest(SessionContext context, String method, String path) {
+        return new HttpRequestMessageImpl(
+                context,
+                "HTTP/1.1",
+                method,
+                path,
+                null,
+                null,
+                "192.168.0.2",
+                "https",
+                7002,
+                "localhost",
+                new LocalAddress("777"),
+                false);
     }
 }

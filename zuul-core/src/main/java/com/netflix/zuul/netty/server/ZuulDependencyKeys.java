@@ -24,13 +24,15 @@ import com.netflix.netty.common.metrics.EventLoopGroupMetrics;
 import com.netflix.netty.common.status.ServerStatusManager;
 import com.netflix.spectator.api.Counter;
 import com.netflix.spectator.api.Registry;
+import com.netflix.spectator.api.histogram.PercentileTimer;
 import com.netflix.zuul.FilterLoader;
 import com.netflix.zuul.FilterUsageNotifier;
 import com.netflix.zuul.RequestCompleteHandler;
 import com.netflix.zuul.context.SessionContextDecorator;
+import com.netflix.zuul.netty.filter.FilterConstraints;
 import com.netflix.zuul.netty.server.push.PushConnectionRegistry;
 import io.netty.channel.ChannelHandler;
-import javax.inject.Provider;
+import jakarta.inject.Provider;
 
 /**
  * User: michaels@netflix.com
@@ -48,6 +50,10 @@ public class ZuulDependencyKeys {
             new ChannelConfigKey<>("sessionCtxDecorator");
     public static final ChannelConfigKey<RequestCompleteHandler> requestCompleteHandler =
             new ChannelConfigKey<>("requestCompleteHandler");
+    public static final ChannelConfigKey<Counter> httpRequestHeadersReadTimeoutCounter =
+            new ChannelConfigKey<>("httpRequestHeadersReadTimeoutCounter");
+    public static final ChannelConfigKey<PercentileTimer> httpRequestHeadersReadTimer =
+            new ChannelConfigKey<>("httpRequestHeadersReadTimer");
     public static final ChannelConfigKey<Counter> httpRequestReadTimeoutCounter =
             new ChannelConfigKey<>("httpRequestReadTimeoutCounter");
     public static final ChannelConfigKey<FilterLoader> filterLoader = new ChannelConfigKey<>("filterLoader");
@@ -67,4 +73,6 @@ public class ZuulDependencyKeys {
             new ChannelConfigKey<>("sslClientCertCheckChannelHandlerProvider");
     public static final ChannelConfigKey<PushConnectionRegistry> pushConnectionRegistry =
             new ChannelConfigKey<>("pushConnectionRegistry");
+    public static final ChannelConfigKey<FilterConstraints> filterConstraints =
+            new ChannelConfigKey<>("filterConstraints");
 }

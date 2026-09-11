@@ -16,6 +16,7 @@
 
 package com.netflix.zuul.netty.connectionpool;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.netflix.zuul.netty.server.Server;
 import com.netflix.zuul.passport.CurrentPassport;
 import io.netty.bootstrap.Bootstrap;
@@ -28,29 +29,37 @@ import io.netty.channel.WriteBufferWaterMark;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.Objects;
+import org.jspecify.annotations.NullMarked;
 
 /**
  * Created by saroskar on 3/16/16.
  */
-public final class NettyClientConnectionFactory {
+@NullMarked
+public class NettyClientConnectionFactory {
 
     private final ConnectionPoolConfig connPoolConfig;
     private final ChannelInitializer<? extends Channel> channelInitializer;
 
-    NettyClientConnectionFactory(
-            final ConnectionPoolConfig connPoolConfig, final ChannelInitializer<? extends Channel> channelInitializer) {
+    public NettyClientConnectionFactory(
+            ConnectionPoolConfig connPoolConfig, ChannelInitializer<? extends Channel> channelInitializer) {
         this.connPoolConfig = connPoolConfig;
         this.channelInitializer = channelInitializer;
     }
 
     public ChannelFuture connect(
-            final EventLoop eventLoop, SocketAddress socketAddress, CurrentPassport passport, IConnectionPool pool) {
+            EventLoop eventLoop, SocketAddress socketAddress, CurrentPassport passport, IConnectionPool pool) {
         Objects.requireNonNull(socketAddress, "socketAddress");
-        if (socketAddress instanceof InetSocketAddress) {
+        if (socketAddress instanceof InetSocketAddress inetSocketAddress) {
             // This should be checked by the ClientConnectionManager
-            assert !((InetSocketAddress) socketAddress).isUnresolved() : socketAddress;
+            assert !inetSocketAddress.isUnresolved() : socketAddress;
         }
-        final Bootstrap bootstrap = new Bootstrap()
+        return createBootstrap(eventLoop, socketAddress, passport, pool).connect();
+    }
+
+    @VisibleForTesting
+    Bootstrap createBootstrap(
+            EventLoop eventLoop, SocketAddress socketAddress, CurrentPassport passport, IConnectionPool pool) {
+        Bootstrap bootstrap = new Bootstrap()
                 .channel(Server.defaultOutboundChannelType.get())
                 .handler(channelInitializer)
                 .group(eventLoop)
@@ -59,8 +68,6 @@ public final class NettyClientConnectionFactory {
                 .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, connPoolConfig.getConnectTimeout())
                 .option(ChannelOption.SO_KEEPALIVE, connPoolConfig.getTcpKeepAlive())
                 .option(ChannelOption.TCP_NODELAY, connPoolConfig.getTcpNoDelay())
-                .option(ChannelOption.SO_SNDBUF, connPoolConfig.getTcpSendBufferSize())
-                .option(ChannelOption.SO_RCVBUF, connPoolConfig.getTcpReceiveBufferSize())
                 .option(
                         ChannelOption.WRITE_BUFFER_WATER_MARK,
                         new WriteBufferWaterMark(
@@ -68,6 +75,12 @@ public final class NettyClientConnectionFactory {
                                 connPoolConfig.getNettyWriteBufferHighWaterMark()))
                 .option(ChannelOption.AUTO_READ, connPoolConfig.getNettyAutoRead())
                 .remoteAddress(socketAddress);
-        return bootstrap.connect();
+
+        if (!connPoolConfig.useDefaultTcpBufferSizes()) {
+            bootstrap.option(ChannelOption.SO_SNDBUF, connPoolConfig.getTcpSendBufferSize());
+            bootstrap.option(ChannelOption.SO_RCVBUF, connPoolConfig.getTcpReceiveBufferSize());
+        }
+
+        return bootstrap;
     }
 }
